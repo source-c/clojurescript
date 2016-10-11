@@ -406,13 +406,13 @@
   (emit-wrap env
     (if (= js-type :object)
       (do
-        (emits "{")
+        (emits "({")
         (when-let [items (seq items)]
           (let [[[k v] & r] items]
             (emits "\"" (name k) "\": " v)
             (doseq [[k v] r]
               (emits ", \"" (name k) "\": " v))))
-        (emits "}"))
+        (emits "})"))
       (emits "[" (comma-sep items) "]"))))
 
 (defmethod emit* :constant
@@ -609,9 +609,9 @@
   (when (or init (:def-emits-var env))
     (let [mname (munge name)]
      (emit-comment env doc (concat jsdoc (:jsdoc init)))
-     (when (:def-emits-var env)
-       (when (= :return (:context env))
+     (when (= :return (:context env))
          (emitln "return ("))
+     (when (:def-emits-var env)
        (emitln "(function (){"))
      (emits var)
      (when init
@@ -625,9 +625,9 @@
                 {:op  :var-special
                  :env (assoc env :context :expr)}
                 var-ast))
-       (emitln ");})()")
-       (when (= :return (:context env))
-         (emitln ")")))
+       (emitln ");})()"))
+     (when (= :return (:context env))
+         (emitln ")"))
      ;; NOTE: JavaScriptCore does not like this under advanced compilation
      ;; this change was primarily for REPL interactions - David
      ;(emits " = (typeof " mname " != 'undefined') ? " mname " : undefined")
@@ -933,7 +933,7 @@
                            ;; ignore new type hints for now - David
                            (and (not (set? tag))
                                 (not ('#{any clj clj-or-nil clj-nil number string boolean function object array} tag))
-                                (when-let [ps (:protocols (ana/resolve-existing-var (dissoc env :locals) tag))]
+                                (when-let [ps (:protocols (ana/resolve-existing-var env (symbol (name tag))))]
                                   (ps protocol)))))))
         opt-not? (and (= (:name info) 'cljs.core/not)
                       (= (ana/infer-tag env (first (:args expr))) 'boolean))
@@ -1058,6 +1058,11 @@
         (emitln "goog.require('" (munge lib) "');")))
     (when (-> libs meta :reload-all)
       (emitln "if(!COMPILED) " loaded-libs " = cljs.core.into(" loaded-libs-temp ", " loaded-libs ");"))))
+
+(defmethod emit* :ns*
+  [{:keys [name requires uses require-macros reloads env]}]
+  (load-libs requires nil (:require reloads))
+  (load-libs uses requires (:use reloads)))
 
 (defmethod emit* :ns
   [{:keys [name requires uses require-macros reloads env]}]
@@ -1203,17 +1208,30 @@
 #?(:clj
    (defn emit-source-map [src dest sm-data opts]
      (let [sm-file (io/file (str (.getPath ^File dest) ".map"))]
-       (emits "\n//# sourceMappingURL="
-         (or (:source-map-url opts) (.getName sm-file))
-         (if (true? (:source-map-timestamp opts))
-           (str "?rel=" (System/currentTimeMillis))
-           ""))
+       (if-let [smap (:source-map-asset-path opts)]
+         (emits "\n//# sourceMappingURL=" smap
+           (string/replace (util/path sm-file)
+             (str (util/path (io/file (:output-dir opts))))
+             "")
+           (if (true? (:source-map-timestamp opts))
+             (str
+               (if-not (string/index-of smap "?") "?" "&")
+               "rel=" (System/currentTimeMillis))
+             ""))
+         (emits "\n//# sourceMappingURL="
+           (or (:source-map-url opts) (.getName sm-file))
+           (if (true? (:source-map-timestamp opts))
+             (str "?rel=" (System/currentTimeMillis))
+             "")))
        (spit sm-file
          (sm/encode {(url-path src) (:source-map sm-data)}
            {:lines (+ (:gen-line sm-data) 2)
             :file (url-path dest)
+            :source-map-path (:source-map-path opts)
             :source-map-timestamp (:source-map-timestamp opts)
-            :source-map-pretty-print (:source-map-pretty-print opts)})))))
+            :source-map-pretty-print (:source-map-pretty-print opts)
+            :relpaths {(util/path src)
+                       (util/ns->relpath (first (:provides opts)) (:ext opts))}})))))
 
 #?(:clj
    (defn emit-source [src dest ext opts]
@@ -1231,21 +1249,40 @@
          (emitln (compiled-by-string opts))
          (with-open [rdr (io/reader src)]
            (let [env (ana/empty-env)]
-             (loop [forms   (ana/forms-seq* rdr (util/path src))
-                    ns-name nil
-                    deps    nil]
+             (loop [forms       (ana/forms-seq* rdr (util/path src))
+                    ns-name     nil
+                    deps        nil]
                (if (seq forms)
                  (let [env (assoc env :ns (ana/get-namespace ana/*cljs-ns*))
-                       ast (ana/analyze env (first forms) nil opts)]
-                   (emit ast)
-                   (if (= :ns (:op ast))
+                       {:keys [op] :as ast} (ana/analyze env (first forms) nil opts)]
+                   (cond
+                     (= op :ns)
                      (let [ns-name (:name ast)
                            ns-name (if (and (= 'cljs.core ns-name)
-                                            (= "cljc" ext))
+                                         (= "cljc" ext))
                                      'cljs.core$macros
                                      ns-name)]
+                       (emit ast)
                        (recur (rest forms) ns-name (merge (:uses ast) (:requires ast))))
-                     (recur (rest forms) ns-name deps)))
+
+                     (= :ns* (:op ast))
+                     (let [ns-emitted? (some? ns-name)
+                           ns-name (ana/gen-user-ns src)]
+                       (if-not ns-emitted?
+                         (emit (assoc ast :name ns-name :op :ns))
+                         (emit ast))
+                       (recur (rest forms) ns-name (merge deps (:uses ast) (:requires ast))))
+
+                     :else
+                     (let [ns-emitted? (some? ns-name)
+                           ns-name (if-not ns-emitted?
+                                     (ana/gen-user-ns src)
+                                     ns-name)]
+                       (when-not ns-emitted?
+                         (emit {:op :ns
+                                :name ns-name}))
+                       (emit ast)
+                       (recur (rest forms) ns-name deps))))
                  (let [sm-data (when *source-map-data* @*source-map-data*)
                        ret     (merge
                                  {:ns         (or ns-name 'cljs.user)
@@ -1261,7 +1298,8 @@
                                  (when sm-data
                                    {:source-map (:source-map sm-data)}))]
                    (when (and sm-data (= :none (:optimizations opts)))
-                     (emit-source-map src dest sm-data opts))
+                     (emit-source-map src dest sm-data
+                       (merge opts {:ext ext :provides [ns-name]})))
                    (let [path (.getPath (.toURL ^File dest))]
                      (swap! env/*compiler* assoc-in [::compiled-cljs path] ret))
                    (let [{:keys [output-dir cache-analysis]} opts]

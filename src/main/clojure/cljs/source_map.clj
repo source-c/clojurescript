@@ -1,3 +1,11 @@
+;; Copyright (c) Rich Hickey. All rights reserved.
+;; The use and distribution terms for this software are covered by the
+;; Eclipse Public License 1.0 (http://opensource.org/licenses/eclipse-1.0.php)
+;; which can be found in the file epl-v10.html at the root of this distribution.
+;; By using this software in any fashion, you are agreeing to be bound by
+;; the terms of this license.
+;; You must not remove this notice, or any other, from this software.
+
 (ns cljs.source-map
   (:require [clojure.java.io :as io]
             [clojure.string :as string]
@@ -193,26 +201,24 @@
             [] cols)))
       [] lines)))
 
-(defn relativize-path [path {:keys [output-dir source-map-path source-map relpaths]}]
-  (let [bare-munged-path (cond
-                          (re-find #"\.jar!/" path)
-                          (str (or source-map-path output-dir) (second (string/split path #"\.jar!")))
-
-                          :else
-                          (str (or source-map-path output-dir) "/" (get relpaths path)))]
-    (cond source-map-path
-          bare-munged-path
-
-          :default
-          (let [unrelativized-juri     (-> bare-munged-path
-                                            io/file
-                                            .toURI)
-                source-map-parent-juri (-> source-map
-                                            io/file
-                                            .getAbsoluteFile
-                                            .getParentFile
-                                            .toURI)]
-            (str (.relativize source-map-parent-juri unrelativized-juri))))))
+(defn relativize-path
+  "Relativize a path using :source-map-path if provided or the parent directory
+   otherwise."
+  [path {:keys [output-dir source-map-path source-map relpaths] :as opts}]
+  (let [bare-munged-path
+        (cond
+          (re-find #"\.jar!/" path)
+          (str (or source-map-path output-dir)
+               (second (string/split path #"\.jar!")))
+          :else
+          (str (or source-map-path output-dir)
+               "/" (get relpaths path)))]
+    (cond
+      source-map-path bare-munged-path
+      :else
+      (let [unrel-uri (-> bare-munged-path io/file .toURI)
+            sm-parent-uri (-> source-map io/file .getAbsoluteFile .getParentFile .toURI)]
+        (str (.relativize sm-parent-uri unrel-uri))))))
 
 (defn encode*
   "Take an internal source map representation represented as nested
@@ -257,13 +263,16 @@
              "sources" (into []
                              (let [paths (keys m)
                                    f (comp
-                                      (if (true? (:source-map-timestamp opts))
-                                        #(str % "?rel=" (System/currentTimeMillis))
-                                        identity)
-                                      (if (or (:output-dir opts)
-                                              (:source-map-path opts))
-                                        #(relativize-path % opts)
-                                        #(last (string/split % #"/"))))]
+                                       (if (true? (:source-map-timestamp opts))
+                                         (fn [uri]
+                                           (if-not (string/index-of uri "?")
+                                             (str uri "?rel=" (System/currentTimeMillis))
+                                             (str uri "&rel=" (System/currentTimeMillis))))
+                                         identity)
+                                       (if (or (:output-dir opts)
+                                               (:source-map-path opts))
+                                         #(relativize-path % opts)
+                                         #(last (string/split % #"/"))))]
                                (map f paths)))
              "lineCount" (:lines opts)
              "mappings" (->> (lines->segs (concat preamble-lines @lines))

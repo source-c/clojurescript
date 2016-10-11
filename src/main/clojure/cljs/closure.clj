@@ -34,7 +34,7 @@
    JavaScript or a deps file for use during development.
   "
   (:refer-clojure :exclude [compile])
-  (:require [cljs.util :as util]
+  (:require [cljs.util :as util :refer [distinct-by]]
             [cljs.core :as cljsm]
             [cljs.compiler :as comp]
             [cljs.analyzer :as ana]
@@ -60,8 +60,6 @@
               ES6ModuleLoader AbstractCompiler TransformAMDToCJSModule
               ProcessEs6Modules CompilerInput]
            [com.google.javascript.rhino Node]
-           [java.security MessageDigest]
-           [javax.xml.bind DatatypeConverter]
            [java.nio.file Path Paths Files StandardWatchEventKinds WatchKey
                           WatchEvent FileVisitor FileVisitResult]
            [java.nio.charset Charset StandardCharsets]
@@ -165,11 +163,12 @@
   "Set of all known compiler options."
   #{:anon-fn-naming-policy :asset-path :cache-analysis :closure-defines :closure-extra-annotations
     :closure-warnings :compiler-stats :dump-core :elide-asserts :externs :foreign-libs
-    :hashbang :language-in :language-out :libs :main :modules :source-map-path :optimizations
-    :optimize-constants :output-dir :output-to :output-wrapper :parallel-build :preamble
+    :hashbang :language-in :language-out :libs :main :modules :source-map-path :source-map-asset-path
+    :optimizations :optimize-constants :output-dir :output-to :output-wrapper :parallel-build :preamble
     :pretty-print :print-input-delimiter :pseudo-names :recompile-dependents :source-map
     :source-map-inline :source-map-timestamp :static-fns :target :verbose :warnings
-    :emit-constants :ups-externs :ups-foreign-libs :ups-libs :warning-handlers})
+    :emit-constants :ups-externs :ups-foreign-libs :ups-libs :warning-handlers :preloads
+    :browser-repl})
 
 (def string->charset
   {"iso-8859-1" StandardCharsets/ISO_8859_1
@@ -262,8 +261,7 @@
       (let [key (name key)]
         (cond
           (string? val) (.setDefineToStringLiteral compiler-options key val)
-          (integer? val) (.setDefineToIntegerLiteral compiler-options key val)
-          (float? val) (.setDefineToDoubleLiteral compiler-options key val)
+          (number? val) (.setDefineToDoubleLiteral compiler-options key val)
           (or (true? val)
               (false? val)) (.setDefineToBooleanLiteral compiler-options key val)
           :else (println "value for" key "must be string, int, float, or bool"))))
@@ -642,14 +640,14 @@
   [ns]
   (if (= "cljs.core$macros" (str ns))
     (let [relpath "cljs/core.cljc"]
-      {:relative-path relpath :uri (io/resource relpath)})
+      {:relative-path relpath :uri (io/resource relpath) :ext :cljc})
     (let [path    (-> (munge ns) (string/replace \. \/))
           relpath (str path ".cljs")]
       (if-let [res (io/resource relpath)]
-        {:relative-path relpath :uri res}
+        {:relative-path relpath :uri res :ext :cljs}
         (let [relpath (str path ".cljc")]
           (if-let [res (io/resource relpath)]
-            {:relative-path relpath :uri res}))))))
+            {:relative-path relpath :uri res :ext :cljc}))))))
 
 (defn source-for-namespace
   "Given a namespace and compilation environment return the relative path and
@@ -660,13 +658,13 @@
         path    (string/replace ns-str \. \/)
         relpath (str path ".cljs")]
     (if-let [cljs-res (io/resource relpath)]
-      {:relative-path relpath :uri cljs-res}
+      {:relative-path relpath :uri cljs-res :ext :cljs}
       (let [relpath (str path ".cljc")]
         (if-let [cljc-res (io/resource relpath)]
-          {:relative-path relpath :uri cljc-res}
+          {:relative-path relpath :uri cljc-res :ext :cljc}
           (let [relpath (str path ".js")]
             (if-let [js-res (io/resource relpath)]
-              {:relative-path relpath :uri js-res}
+              {:relative-path relpath :uri js-res :ext :js}
               (let [ijs (get-in @compiler-env [:js-dependency-index (str ns)])
                    relpath (or (:file ijs) (:url ijs))]
                (if-let [js-res (and relpath
@@ -675,7 +673,7 @@
                                  (or (and (util/url? relpath) relpath)
                                    (try (URL. relpath) (catch Throwable t))
                                    (io/resource relpath)))]
-                 {:relative-path relpath :uri js-res}
+                 {:relative-path relpath :uri js-res :ext :js}
                  (throw
                    (IllegalArgumentException.
                      (str "Namespace " ns " does not exist"))))))))))))
@@ -763,9 +761,9 @@
                   (javascript-file foreign url provides requires)
                   js-map)))
             required-js)
-          [(when (-> @env/*compiler* :options :emit-constants)
-             (let [url (deps/to-url (str (util/output-directory opts) "/constants_table.js"))]
-               (javascript-file nil url url ["constants-table"] ["cljs.core"] nil nil)))]
+          (when (-> @env/*compiler* :options :emit-constants)
+            (let [url (deps/to-url (str (util/output-directory opts) "/constants_table.js"))]
+              [(javascript-file nil url url ["constants-table"] ["cljs.core"] nil nil)]))
           required-cljs
           inputs)))))
 
@@ -878,11 +876,11 @@
         inputs))
 
 (defn add-js-sources
-  "Given list of IJavaScript objects, add foreign-deps and constants-table
-  IJavaScript objects to the list."
+  "Given list of IJavaScript objects, add foreign-deps, constants-table
+   IJavaScript objects to the list."
   [inputs opts]
-  (let [requires      (set (mapcat deps/-requires inputs))
-        required-js   (js-dependencies opts requires)]
+  (let [requires    (set (mapcat deps/-requires inputs))
+        required-js (js-dependencies opts requires)]
     (concat
       (map
         (fn [{:keys [foreign url file provides requires] :as js-map}]
@@ -891,10 +889,39 @@
               (javascript-file foreign url provides requires)
               js-map)))
         required-js)
-      [(when (-> @env/*compiler* :options :emit-constants)
-         (let [url (deps/to-url (str (util/output-directory opts) "/constants_table.js"))]
-           (javascript-file nil url url ["constants-table"] ["cljs.core"] nil nil)))]
+      (when (-> @env/*compiler* :options :emit-constants)
+        (let [url (deps/to-url (str (util/output-directory opts) "/constants_table.js"))]
+          [(javascript-file nil url url ["constants-table"] ["cljs.core"] nil nil)]))
       inputs)))
+
+(defn add-preloads
+  "Add :preloads to a given set of inputs (IJavaScript). Returns a new
+  list of inputs where the preloaded namespaces and their deps come immediately after
+  cljs.core or the constants table depending on the optimization setting. Any
+  files needing copying or compilation will be compiled and/or copied to the
+  appropiate location."
+  [inputs opts]
+  (let [pred     (fn [x]
+                   (if (:emit-constants opts)
+                     (not= ["constants-table"] (:provides x))
+                     (not= ["cljs.core"] (:provides x))))
+        pre      (take-while pred inputs)
+        post     (drop-while pred inputs)
+        preloads (remove nil?
+                   (map
+                     (fn [preload]
+                       (try
+                         (comp/find-source preload)
+                         (catch Throwable t
+                           (util/debug-prn "WARNING: preload namespace" preload "does not exist"))))
+                     (:preloads opts)))]
+    (distinct-by :provides
+      (concat pre [(first post)]
+        (-> (add-dependency-sources preloads opts)
+          deps/dependency-order
+          (compile-sources opts)
+          (add-js-sources opts))
+        (next post)))))
 
 (comment
   (comp/find-sources-root "samples/hello/src")
@@ -1238,7 +1265,9 @@
                   (cons "var CLOSURE_NO_DEPS = true;" sources)
                   sources)
         ^List inputs (map #(js-source-file (javascript-name %) %) sources)
-        ^Result result (.compile closure-compiler externs inputs compiler-options)]
+        ^Result result (util/measure (:compiler-stats opts)
+                         "Optimizing with Google Closure Compiler"
+                         (.compile closure-compiler externs inputs compiler-options))]
     (if (.success result)
       ;; compiler.getSourceMap().reset()
       (let [source (.toSource closure-compiler)]
@@ -1362,6 +1391,16 @@
 
 (declare foreign-deps-str add-header add-source-map-link)
 
+(defn preloads
+  ([syms]
+    (preloads syms nil))
+  ([syms mode]
+   (letfn [(preload-str [sym]
+             (str (when (= :browser mode) "document.write('<script>")
+                  "goog.require(\"" (comp/munge sym) "\");"
+                  (if (= :browser mode) "</script>');\n" "\n")))]
+     (map preload-str syms))))
+
 (defn output-main-file [opts]
   (let [asset-path (or (:asset-path opts)
                        (util/output-directory opts))
@@ -1378,14 +1417,16 @@
                "require(path.join(path.resolve(\".\"),\"" asset-path "\",\"goog\",\"bootstrap\",\"nodejs.js\"));\n"
                "require(path.join(path.resolve(\".\"),\"" asset-path "\",\"cljs_deps.js\"));\n"
                "goog.global.CLOSURE_UNCOMPILED_DEFINES = " closure-defines ";\n"
+               (apply str (preloads (:preloads opts)))
                "goog.require(\"" (comp/munge (:main opts)) "\");\n"
                "goog.require(\"cljs.nodejscli\");\n")))
       (output-one-file opts
         (str "var CLOSURE_UNCOMPILED_DEFINES = " closure-defines ";\n"
              "if(typeof goog == \"undefined\") document.write('<script src=\"" asset-path "/goog/base.js\"></script>');\n"
              "document.write('<script src=\"" asset-path "/cljs_deps.js\"></script>');\n"
-             "document.write('<script>if (typeof goog != \"undefined\") { goog.require(\"" (comp/munge (:main opts))
-             "\"); } else { console.warn(\"ClojureScript could not load :main, did you forget to specify :asset-path?\"); };</script>');\n")))))
+             "document.write('<script>if (typeof goog == \"undefined\") console.warn(\"ClojureScript could not load :main, did you forget to specify :asset-path?\");</script>');\n"
+             (apply str (preloads (:preloads opts) :browser))
+             "document.write('<script>goog.require(\"" (comp/munge (:main opts))"\");</script>');\n")))))
 
 (defn output-modules
   "Given compiler options, original IJavaScript sources and a sequence of
@@ -1463,14 +1504,11 @@
          :else (path-from-jarfile url))
 
        (string? js)
-       (let [digest (MessageDigest/getInstance "SHA-1")]
-         (.reset digest)
-         (.update digest (.getBytes ^String js "utf8"))
-         (str
-           (->> (DatatypeConverter/printHexBinary (.digest digest))
-             (take 7)
-             (apply str))
-           ".js"))
+       (str
+         (->> (util/content-sha js)
+           (take 7)
+           (apply str))
+         ".js")
 
        :else (str (random-string 5) ".js")))))
 
@@ -1497,7 +1535,8 @@
     (.getAstRoot input closure-compiler)))
 
 (defn get-source-files [opts]
-  (->> (:foreign-libs opts)
+  (->> (concat (:foreign-libs opts)
+               (:ups-foreign-libs opts))
        (filter #(let [module-type (:module-type %)]
                   (or (= module-type :amd)
                       (= module-type :commonjs)
@@ -1694,7 +1733,7 @@
   )
 
 
-(defn get-upstream-deps* 
+(defn get-upstream-deps*
   "returns a merged map containing all upstream dependencies defined
   by libraries on the classpath."
   ([]
@@ -1711,10 +1750,12 @@
 
 (defn foreign-deps-str [opts sources]
   (letfn [(to-js-str [ijs]
-            (let [url (or (and (#{:advanced :simple} (:optimizations opts))
-                               (:url-min ijs))
-                          (:url ijs))]
-              (slurp url)))]
+            (if-let [url (or (and (#{:advanced :simple} (:optimizations opts))
+                                  (:url-min ijs))
+                             (:url ijs))]
+              (slurp url)
+              (throw (IllegalArgumentException.
+                       (str "Foreign lib " ijs " does not exist")))))]
     (str (string/join "\n" (map to-js-str sources)) "\n")))
 
 (defn add-wrapper [{:keys [output-wrapper] :as opts} js]
@@ -1764,6 +1805,7 @@
 (defn check-source-map [{:keys [output-to source-map output-dir optimizations] :as opts}]
   "When :source-map is specified in opts, "
   (when (and (contains? opts :source-map)
+             (:source-map opts)
              (not (= optimizations :none)))
     (assert (and (or (contains? opts :output-to)
                      (contains? opts :modules))
@@ -1827,7 +1869,9 @@
                  (into {}
                    (map (fn [[k v]]
                           [(if (symbol? k) (str (comp/munge k)) k) v])
-                     (:closure-defines opts)))))
+                     (:closure-defines opts))))
+               (:browser-repl opts)
+               (update-in [:preloads] (fnil conj []) 'clojure.browser.repl.preload))
         {:keys [libs foreign-libs externs]} (get-upstream-deps)
         emit-constants (or (and (= optimizations :advanced)
                                 (not (false? (:optimize-constants opts))))
@@ -1857,13 +1901,9 @@
         (not (false? (:static-fns opts))) (assoc :static-fns true)
         (not (false? (:optimize-constants opts))) (assoc :optimize-constants true)))))
 
-(defn process-js-modules
-  "Given the current compiler options, converts JavaScript modules to Google
-  Closure modules and writes them to disk. Adds mapping from original module
-  namespace to new module namespace to compiler env. Returns modified compiler
-  options where new modules are passed with :libs option."
-  [opts]
-  (let [js-modules (filter :module-type (:foreign-libs opts))]
+(defn- process-js-modules*
+  [opts k]
+  (let [js-modules (filter :module-type (k opts))]
     (reduce (fn [new-opts {:keys [file module-type] :as lib}]
               (if (or (and (= module-type :commonjs) can-convert-commonjs?)
                       (and (= module-type :amd) can-convert-amd?)
@@ -1875,10 +1915,20 @@
                       #(update-in % [:js-module-index] assoc provide module-name)))
                   (-> new-opts
                       (update-in [:libs] (comp vec conj) (:out-file ijs))
-                      (update-in [:foreign-libs]
+                      (update-in [k]
                         (comp vec (fn [libs] (remove #(= (:file %) file) libs))))))
                 new-opts))
             opts js-modules)))
+
+(defn process-js-modules
+  "Given the current compiler options, converts JavaScript modules to Google
+  Closure modules and writes them to disk. Adds mapping from original module
+  namespace to new module namespace to compiler env. Returns modified compiler
+  options where new modules are passed with :libs option."
+  [opts]
+  (-> opts
+      (process-js-modules* :foreign-libs)
+      (process-js-modules* :ups-foreign-libs)))
 
 (defn build
   "Given a source which can be compiled, produce runnable JavaScript."
@@ -1946,6 +1996,7 @@
                                 (add-js-sources all-opts)
                                 (cond-> (= :nodejs (:target all-opts)) (concat [(-compile (io/resource "cljs/nodejs.cljs") all-opts)]))
                                 deps/dependency-order
+                                (add-preloads all-opts)
                                 add-goog-base
                                 (cond-> (= :nodejs (:target all-opts)) (concat [(-compile (io/resource "cljs/nodejscli.cljs") all-opts)])))
                  _ (when (:emit-constants all-opts)
@@ -2000,6 +2051,26 @@
       {:output-to "samples/hello/out/hello.js"
        :entries '#{cljs.reader hello.core}}}})
   )
+
+(defn ^File target-file-for-cljs-ns
+  [ns-sym output-dir]
+  (util/to-target-file
+    (util/output-directory {:output-dir output-dir})
+    {:ns ns-sym}))
+
+(defn mark-cljs-ns-for-recompile!
+  [ns-sym output-dir]
+  (let [s (target-file-for-cljs-ns ns-sym output-dir)]
+    (when (.exists s)
+      (.setLastModified s 5000))))
+
+(defn cljs-dependents-for-macro-namespaces
+  [state namespaces]
+  (map :name
+    (let [namespaces-set (set namespaces)]
+      (filter (fn [x] (not-empty
+                        (set/intersection namespaces-set (-> x :require-macros vals set))))
+        (vals (:cljs.analyzer/namespaces @state))))))
 
 (defn watch
   "Given a source directory, produce runnable JavaScript. Watch the source
@@ -2061,16 +2132,33 @@
         (loop [key nil]
           (when (and (or (nil? quit) (not @quit))
                      (or (nil? key) (. ^WatchKey key reset)))
-            (let [key (. srvc (poll 300 TimeUnit/MILLISECONDS))]
+            (let [key (. srvc (poll 300 TimeUnit/MILLISECONDS))
+                  poll-events-seq (when key (seq (.pollEvents key)))]
               (when (and key
                          (some
                            (fn [^WatchEvent e]
                              (let [fstr (.. e context toString)]
                                (and (or (. fstr (endsWith "cljc"))
                                         (. fstr (endsWith "cljs"))
+                                        (. fstr (endsWith "clj"))
                                         (. fstr (endsWith "js")))
                                     (not (. fstr (startsWith ".#"))))))
-                           (seq (.pollEvents key))))
+                           poll-events-seq))
+                (when-let [clj-files (seq (keep (fn [^WatchEvent e]
+                                                  (let [ctx (.context e)
+                                                        fstr (.toString ctx)]
+                                                    (when (and (or (. fstr (endsWith "cljc"))
+                                                                   (. fstr (endsWith "clj")))
+                                                               (not (. fstr (startsWith ".#"))))
+                                                      ctx)))
+                                            poll-events-seq))]
+                  (let [^Path dir (.watchable key)
+                        file-seq (map #(.toFile (.resolve dir %)) clj-files)
+                        nses (map (comp :ns ana/parse-ns) file-seq)]
+                    (doseq [ns nses]
+                      (require ns :reload))
+                    (doseq [ns (cljs-dependents-for-macro-namespaces compiler-env nses)]
+                      (mark-cljs-ns-for-recompile! ns (:output-dir opts)))))
                 (println "Change detected, recompiling ...")
                 (flush)
                 (buildf))

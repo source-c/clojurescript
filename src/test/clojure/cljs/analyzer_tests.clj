@@ -1,10 +1,25 @@
+;; Copyright (c) Rich Hickey. All rights reserved.
+;; The use and distribution terms for this software are covered by the
+;; Eclipse Public License 1.0 (http://opensource.org/licenses/eclipse-1.0.php)
+;; which can be found in the file epl-v10.html at the root of this distribution.
+;; By using this software in any fashion, you are agreeing to be bound by
+;; the terms of this license.
+;; You must not remove this notice, or any other, from this software.
+
 (ns cljs.analyzer-tests
   (:require [clojure.java.io :as io]
             [cljs.analyzer :as a]
             [cljs.env :as e]
             [cljs.env :as env]
-            [cljs.analyzer.api :as ana-api])
+            [cljs.analyzer.api :as ana-api]
+            [cljs.util :as util])
   (:use clojure.test))
+
+(defn collecting-warning-handler [state]
+  (fn [warning-type env extra]
+    (when (warning-type a/*cljs-warnings*)
+      (when-let [s (a/error-message warning-type extra)]
+        (swap! state conj s)))))
 
 ;;******************************************************************************
 ;;  cljs-warnings tests
@@ -54,13 +69,13 @@
           (a/analyze ns-env '(ns foo.bar (:require [baz.woz :as woz :refer [] :plop])))
           (catch Exception e
             (.getMessage e)))
-        "Only :as alias and :refer (names) options supported in :require"))
+        "Only :as alias, :refer (names) and :rename {from to} options supported in :require"))
   (is (.startsWith
         (try
           (a/analyze ns-env '(ns foo.bar (:require [baz.woz :as woz :refer [] :plop true])))
           (catch Exception e
             (.getMessage e)))
-        "Only :as and :refer options supported in :require / :require-macros"))
+        "Only :as, :refer and :rename options supported in :require / :require-macros"))
   (is (.startsWith
         (try
           (a/analyze ns-env '(ns foo.bar (:require [baz.woz :as woz :refer [] :as boz :refer []])))
@@ -72,13 +87,55 @@
           (a/analyze ns-env '(ns foo.bar (:refer-clojure :refer [])))
           (catch Exception e
             (.getMessage e)))
-        "Only [:refer-clojure :exclude (names)] form supported"))
+        "Only [:refer-clojure :exclude (names)] and optionally `:rename {from to}` specs supported"))
+  (is (.startsWith
+        (try
+          (a/analyze ns-env '(ns foo.bar (:refer-clojure :rename [1 2])))
+          (catch Exception e
+            (.getMessage e)))
+        "Only [:refer-clojure :exclude (names)] and optionally `:rename {from to}` specs supported"))
   (is (.startsWith
         (try
           (a/analyze ns-env '(ns foo.bar (:use [baz.woz :exclude []])))
           (catch Exception e
             (.getMessage e)))
-        "Only [lib.ns :only (names)] specs supported in :use / :use-macros"))
+        "Only [lib.ns :only (names)] and optionally `:rename {from to}` specs supported in :use / :use-macros"))
+  (is (.startsWith
+        (try
+          (a/analyze ns-env '(ns foo.bar (:use [baz.woz])))
+          (catch Exception e
+            (.getMessage e)))
+        "Only [lib.ns :only (names)] and optionally `:rename {from to}` specs supported in :use / :use-macros"))
+  (is (.startsWith
+        (try
+          (a/analyze ns-env '(ns foo.bar (:use [baz.woz :only])))
+          (catch Exception e
+            (.getMessage e)))
+        "Only [lib.ns :only (names)] and optionally `:rename {from to}` specs supported in :use / :use-macros"))
+  (is (.startsWith
+        (try
+          (a/analyze ns-env '(ns foo.bar (:use [baz.woz :only [1 2 3]])))
+          (catch Exception e
+            (.getMessage e)))
+        "Only [lib.ns :only (names)] and optionally `:rename {from to}` specs supported in :use / :use-macros"))
+  (is (.startsWith
+        (try
+          (a/analyze ns-env '(ns foo.bar (:use [baz.woz :rename [1 2]])))
+          (catch Exception e
+            (.getMessage e)))
+        "Only [lib.ns :only (names)] and optionally `:rename {from to}` specs supported in :use / :use-macros"))
+  (is (.startsWith
+        (try
+          (a/analyze ns-env '(ns foo.bar (:use [foo.bar :rename {baz qux}])))
+          (catch Exception e
+            (.getMessage e)))
+        "Only [lib.ns :only (names)] and optionally `:rename {from to}` specs supported in :use / :use-macros"))
+  (is (.startsWith
+        (try
+          (a/analyze ns-env '(ns foo.bar (:use [baz.woz :only [foo] :only [bar]])))
+          (catch Exception e
+            (.getMessage e)))
+        "Each of :only and :rename options may only be specified once in :use / :use-macros"))
   (is (.startsWith
         (try
           (a/analyze ns-env '(ns foo.bar (:require [baz.woz :as []])))
@@ -91,6 +148,12 @@
           (catch Exception e
             (.getMessage e)))
         ":as alias must be unique"))
+  (is (.startsWith
+        (try
+          (a/analyze ns-env '(ns foo.bar (:require [foo.bar :rename {baz qux}])))
+          (catch Exception e
+            (.getMessage e)))
+        "Renamed symbol baz not referred"))
   (is (.startsWith
         (try
           (a/analyze ns-env '(ns foo.bar (:unless [])))
@@ -272,6 +335,26 @@
            (set '((:require-macros (bar :refer [quux]) :reload)
                   (:require (bar :refer [baz]) :reload)))))))
 
+(deftest test-rewrite-cljs-aliases
+  (is (= (a/rewrite-cljs-aliases
+           '((:require-macros (bar :refer [quux]) :reload)
+             (:require (clojure.spec :as s :refer [fdef]) :reload)))
+         '((:require-macros (bar :refer [quux]) :reload)
+           (:require (cljs.spec :as s :refer [fdef])
+                     (cljs.spec :as clojure.spec) :reload))))
+  (is (= (a/rewrite-cljs-aliases
+           '((:refer-clojure :exclude [first])
+              (:require-macros (bar :refer [quux]) :reload)
+              (:require (clojure.spec :as s) :reload)))
+         '((:refer-clojure :exclude [first])
+           (:require-macros (bar :refer [quux]) :reload)
+           (:require (cljs.spec :as s) (cljs.spec :as clojure.spec) :reload))))
+  (is (= (a/rewrite-cljs-aliases
+           '((:require-macros (bar :refer [quux]) :reload)
+             (:require clojure.spec :reload)))
+         '((:require-macros (bar :refer [quux]) :reload)
+           (:require (cljs.spec :as clojure.spec) :reload)))))
+
 ;; =============================================================================
 ;; Namespace metadata
 
@@ -335,3 +418,189 @@
           (catch Exception e
             (.getMessage e)))
         "Can't set! a constant")))
+
+(deftest test-cljs-1508-rename
+  (binding [a/*cljs-ns* a/*cljs-ns*]
+    (let [parsed-ns (e/with-compiler-env test-cenv
+                      (a/analyze test-env
+                        '(ns foo.core
+                           (:require [clojure.set :as set :refer [intersection] :rename {intersection foo}]))))]
+      (is (nil? (-> parsed-ns :uses (get 'foo))))
+      (is (nil? (-> parsed-ns :uses (get 'intersection))))
+      (is (some? (-> parsed-ns :renames (get 'foo))))
+      (is (= (-> parsed-ns :renames (get 'foo))
+             'clojure.set/intersection)))
+    (is (e/with-compiler-env test-cenv
+          (a/analyze test-env
+            '(ns foo.core
+               (:use [clojure.set :only [intersection] :rename {intersection foo}])))))
+    (is (= (e/with-compiler-env (atom {::a/namespaces
+                                       {'foo.core {:renames '{foo clojure.set/intersection}}}})
+             (a/resolve-var {:ns {:name 'foo.core}} 'foo))
+            '{:name clojure.set/intersection
+              :ns   clojure.set}))
+    (let [rwhen (e/with-compiler-env (atom (update-in @test-cenv [::a/namespaces]
+                                             merge {'foo.core {:rename-macros '{always cljs.core/when}}}))
+                  (a/resolve-macro-var {:ns {:name 'foo.core}} 'always))]
+      (is (= (-> rwhen :name)
+             'cljs.core/when)))
+    (let [parsed-ns (e/with-compiler-env test-cenv
+                      (a/analyze test-env
+                        '(ns foo.core
+                           (:refer-clojure :rename {when always
+                                                    map  core-map}))))]
+      (is (= (-> parsed-ns :excludes) #{}))
+      (is (= (-> parsed-ns :rename-macros) '{always cljs.core/when}))
+      (is (= (-> parsed-ns :renames) '{core-map cljs.core/map})))
+    (is (thrown? Exception (e/with-compiler-env test-cenv
+                             (a/analyze test-env
+                               '(ns foo.core
+                                  (:require [clojure.set :rename {intersection foo}]))))))))
+
+(deftest test-cljs-1274
+  (let [test-env (assoc-in (a/empty-env) [:ns :name] 'cljs.user)]
+    (binding [a/*cljs-ns* a/*cljs-ns*]
+      (is (thrown-with-msg? Exception #"Can't def ns-qualified name in namespace foo.core"
+            (a/analyze test-env '(def foo.core/foo 43))))
+      (is (a/analyze test-env '(def cljs.user/foo 43))))))
+
+(deftest test-cljs-1763
+  (let [parsed (a/parse-ns-excludes {} '())]
+    (is (= parsed
+           {:excludes #{}
+            :renames {}}))
+    (is (set? (:excludes parsed)))))
+
+(deftest test-cljs-1785-js-shadowed-by-local
+  (let [ws (atom [])]
+    (a/with-warning-handlers [(collecting-warning-handler ws)]
+      (a/analyze ns-env
+        '(fn [foo]
+           (let [x js/foo]
+             (println x)))))
+    (is (.startsWith (first @ws) "js/foo is shadowed by a local"))))
+
+(deftest test-canonicalize-specs
+  (is (= (a/canonicalize-specs '((quote [clojure.set :as set])))
+         '([clojure.set :as set])))
+  (is (= (a/canonicalize-specs '(:exclude (quote [map mapv])))
+         '(:exclude [map mapv])))
+  (is (= (a/canonicalize-specs '(:require (quote [clojure.set :as set])))
+         '(:require [clojure.set :as set]))))
+
+(deftest test-cljs-1346
+  (testing "`ns*` special form conformance"
+    (let [test-env (a/empty-env)]
+      (is (= (-> (a/parse-ns '((require '[clojure.set :as set]))) :requires)
+            '#{cljs.core clojure.set})))
+    (binding [a/*cljs-ns* a/*cljs-ns*
+              a/*cljs-warnings* nil]
+      (let [test-env (a/empty-env)]
+        (is (= (-> (a/analyze test-env '(require '[clojure.set :as set])) :requires vals set)
+              '#{clojure.set})))
+      (let [test-env (a/empty-env)]
+        (is (= (-> (a/analyze test-env '(require '[clojure.set :as set :refer [union intersection]])) :uses keys set)
+              '#{union intersection})))
+      (let [test-env (a/empty-env)]
+        (is (= (-> (a/analyze test-env '(require '[clojure.set :as set]
+                                          '[clojure.string :as str]))
+                 :requires vals set)
+              '#{clojure.set clojure.string})))
+      (let [test-env (a/empty-env)]
+        (is (= (-> (a/analyze test-env '(require-macros '[cljs.test :as test])) :require-macros vals set)
+              '#{cljs.test})))
+      (let [test-env (a/empty-env)
+            parsed (a/analyze test-env '(require-macros '[cljs.test :as test  :refer [deftest is]]))]
+        (is (= (-> parsed :require-macros vals set)
+              '#{cljs.test}))
+        (is (= (-> parsed :use-macros keys set)
+              '#{is deftest})))
+      (let [test-env (a/empty-env)
+            parsed (a/analyze test-env '(require '[cljs.test :as test :refer-macros [deftest is]]))]
+        (is (= (-> parsed :requires vals set)
+              '#{cljs.test}))
+        (is (= (-> parsed :require-macros vals set)
+              '#{cljs.test}))
+        (is (= (-> parsed :use-macros keys set)
+              '#{is deftest})))
+      (let [test-env (a/empty-env)
+            parsed (a/analyze test-env '(use '[clojure.set :only [intersection]]))]
+        (is (= (-> parsed :uses keys set)
+              '#{intersection}))
+        (is (= (-> parsed :requires)
+              '{clojure.set clojure.set})))
+      (let [test-env (a/empty-env)
+            parsed (a/analyze test-env '(use-macros '[cljs.test :only [deftest is]]))]
+        (is (= (-> parsed :use-macros keys set)
+              '#{deftest is}))
+        (is (= (-> parsed :require-macros)
+              '{cljs.test cljs.test}))
+        (is (nil? (-> parsed :requires))))
+      (let [test-env (a/empty-env)
+            parsed (a/analyze test-env '(import '[goog.math Long Integer]))]
+        (is (= (-> parsed :imports)
+              (-> parsed :requires)
+              '{Long goog.math.Long
+                Integer goog.math.Integer})))
+      (let [test-env (a/empty-env)
+            parsed (a/analyze test-env '(refer-clojure :exclude '[map mapv]))]
+        (is (= (-> parsed :excludes)
+              '#{map mapv})))))
+  (testing "arguments to require should be quoted"
+    (binding [a/*cljs-ns* a/*cljs-ns*
+              a/*cljs-warnings* nil]
+      (is (thrown-with-msg? Exception #"Arguments to require must be quoted"
+            (a/analyze test-env
+              '(require [clojure.set :as set]))))))
+  (testing "`:ns` and `:ns*` should throw if not `:top-level`"
+    (binding [a/*cljs-ns* a/*cljs-ns*
+              a/*cljs-warnings* nil]
+      (are [analyzed] (thrown-with-msg? Exception
+                        #"Namespace declarations must appear at the top-level."
+                        analyzed)
+          (a/analyze test-env
+          '(def foo
+             (ns foo.core
+               (:require [clojure.set :as set]))))
+        (a/analyze test-env
+          '(fn []
+             (ns foo.core
+               (:require [clojure.set :as set]))))
+        (a/analyze test-env
+          '(map #(ns foo.core
+                   (:require [clojure.set :as set])) [1 2])))
+      (are [analyzed] (thrown-with-msg? Exception
+                        #"Calls to `require` must appear at the top-level."
+                        analyzed)
+        (a/analyze test-env
+          '(def foo
+             (require '[clojure.set :as set])))
+        (a/analyze test-env
+          '(fn [] (require '[clojure.set :as set])))
+        (a/analyze test-env
+          '(map #(require '[clojure.set :as set]) [1 2]))))))
+
+(deftest test-gen-user-ns
+  ;; note: can't use `with-redefs` because direct-linking is enabled
+  (let [s   "src/cljs/foo.cljs"
+        sha (util/content-sha s)]
+    (is (= (a/gen-user-ns s) (symbol (str "cljs.user.foo" (apply str (take 7 sha)))))))
+  (let [a   "src/cljs/foo.cljs"
+        b   "src/cljs/foo.cljc"]
+    ;; namespaces should have different names because the filename hash will be different
+    (is (not= (a/gen-user-ns a) (a/gen-user-ns b)))
+    ;; specifically, only the hashes should differ
+    (let [nsa (str (a/gen-user-ns a))
+          nsb (str (a/gen-user-ns b))]
+      (is (not= (.substring nsa (- (count nsa) 7)) (.substring nsb (- (count nsb) 7))))
+      (is (= (.substring nsa 0 (- (count nsa) 7)) (.substring nsb 0 (- (count nsb) 7)))))))
+
+(deftest test-cljs-1536
+  (let [parsed (e/with-compiler-env test-cenv
+                 (a/analyze (assoc test-env :def-emits-var true)
+                   '(def x 1)))]
+    (is (some? (:var-ast parsed))))
+  (let [parsed (e/with-compiler-env test-cenv
+                 (a/analyze (assoc test-env :def-emits-var true)
+                   '(let [y 1] (def y 2))))]
+    (is (some? (-> parsed :expr :ret :var-ast)))))

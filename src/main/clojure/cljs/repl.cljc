@@ -447,9 +447,13 @@
     (evaluate-form repl-env env filename form wrap *repl-opts*))
   ([repl-env env filename form wrap opts]
    (binding [ana/*cljs-file* filename]
-     (let [ast (ana/analyze env form nil opts)
-           js (comp/emit-str ast)
+     (let [env (assoc env
+                 :root-source-info
+                 {:source-type :fragment
+                  :source-form form})
            def-emits-var (:def-emits-var opts)
+           ast (ana/analyze (assoc env :repl-env repl-env :def-emits-var def-emits-var)
+                 (wrap form) nil opts)
            wrap-js
            ;; TODO: check opts as well - David
            (if (:source-map repl-env)
@@ -457,10 +461,7 @@
                        (atom {:source-map (sorted-map)
                               :gen-col 0
                               :gen-line 0})]
-               (let [js (comp/emit-str
-                          (ana/no-warn
-                            (ana/analyze (assoc env :repl-env repl-env :def-emits-var def-emits-var)
-                              (wrap form) nil opts)))
+               (let [js (comp/emit-str ast)
                      t (System/currentTimeMillis)]
                  (str js
                    "\n//# sourceURL=repl-" t ".js"
@@ -477,17 +478,17 @@
                              ;; handle strings / primitives without metadata
                              (with-out-str (pr form)))]})
                        "UTF-8")))))
-             (comp/emit-str
-               (ana/no-warn
-                 (ana/analyze (assoc env :repl-env repl-env :def-emits-var def-emits-var)
-                   (wrap form) nil opts))))]
-       (when (= (:op ast) :ns)
-         (load-dependencies repl-env
-           (into (vals (:requires ast))
-             (distinct (vals (:uses ast))))
-           opts))
+             (comp/emit-str ast))]
+       ;; NOTE: means macros which expand to ns aren't supported for now
+       ;; when eval'ing individual forms at the REPL - David
+       (when (#{:ns :ns*} (:op ast))
+         (let [ast (ana/no-warn (ana/analyze env form nil opts))]
+           (load-dependencies repl-env
+             (into (vals (:requires ast))
+               (distinct (vals (:uses ast))))
+             opts)))
        (when *cljs-verbose*
-         (err-out (println js)))
+         (err-out (println wrap-js)))
        (let [ret (-evaluate repl-env filename (:line (meta form)) wrap-js)]
          (case (:status ret)
            :error (throw
@@ -502,7 +503,7 @@
                            :error ret
                            :repl-env repl-env
                            :form form
-                           :js js}))
+                           :js wrap-js}))
            :success (:value ret)))))))
 
 (defn load-stream [repl-env filename res]
@@ -545,7 +546,11 @@
 
 (defn- wrap-fn [form]
   (cond
-    (and (seq? form) (= 'ns (first form))) identity
+    (and (seq? form)
+         (#{'ns 'require 'require-macros
+            'use 'use-macros 'import 'refer-clojure} (first form)))
+    identity
+
     ('#{*1 *2 *3 *e} form) (fn [x] `(cljs.core.pr-str ~x))
     :else
     (fn [x]
@@ -576,29 +581,21 @@
      ((or (:wrap opts) wrap-fn) form)
      opts)))
 
-(defn canonicalize-specs [specs]
-  (letfn [(canonicalize [quoted-spec-or-kw]
-            (if (keyword? quoted-spec-or-kw)
-              quoted-spec-or-kw
-              (as-> (second quoted-spec-or-kw) spec
-                (if (vector? spec) spec [spec]))))]
-    (map canonicalize specs)))
-
 (defn decorate-specs [specs]
   (if-let [k (some #{:reload :reload-all} specs)]
     (->> specs (remove #{k}) (map #(vary-meta % assoc :reload k)))
     specs))
 
 (comment
-  (canonicalize-specs
+  (ana/canonicalize-specs
     '['foo.bar '[bar.core :as bar]])
 
-  (canonicalize-specs
+  (ana/canonicalize-specs
     '['foo.bar '[bar.core :as bar] :reload])
 
   (map meta
     (decorate-specs
-      (canonicalize-specs
+      (ana/canonicalize-specs
         '['foo.bar '[bar.core :as bar] :reload])))
   )
 
@@ -616,17 +613,6 @@
 ;; env      - a cljs.analyzer environment, *not* cljs.env environment
 ;; form     - complete form entered at the repl
 ;; opts     - REPL options, essentially augmented cljs.closure/build options
-
-(defn self-require? [specs]
-  (some
-    (fn [quoted-spec-or-kw]
-      (and (not (keyword? quoted-spec-or-kw))
-           (let [spec (second quoted-spec-or-kw)
-                 ns (if (sequential? spec)
-                      (first spec)
-                      spec)]
-             (= ns ana/*cljs-ns*))))
-    specs))
 
 (defn- wrap-self
   "Takes a self-ish fn and returns it wrapped with exception handling.
@@ -671,52 +657,6 @@
     (wrap-special-fns wrap-self
      {'in-ns in-ns-fn
       'clojure.core/in-ns in-ns-fn
-      'require
-      (fn self
-        ([repl-env env form]
-         (self repl-env env form nil))
-        ([repl-env env [_ & specs :as form] opts]
-         (let [is-self-require? (self-require? specs)
-               [target-ns restore-ns]
-               (if-not is-self-require?
-                 [ana/*cljs-ns* nil]
-                 ['cljs.user ana/*cljs-ns*])]
-           (evaluate-form repl-env env "<cljs repl>"
-                          (with-meta
-                            `(~'ns ~target-ns
-                               (:require ~@(-> specs canonicalize-specs decorate-specs)))
-                            {:merge true :line 1 :column 1})
-                          identity opts)
-           (when is-self-require?
-             (set! ana/*cljs-ns* restore-ns)))))
-      'require-macros
-      (fn self
-        ([repl-env env form]
-         (self repl-env env form nil))
-        ([repl-env env [_ & specs :as form] opts]
-         (evaluate-form repl-env env "<cljs repl>"
-                        (with-meta
-                          `(~'ns ~ana/*cljs-ns*
-                             (:require-macros ~@(-> specs canonicalize-specs decorate-specs)))
-                          {:merge true :line 1 :column 1})
-                        identity opts)))
-      'import
-      (fn self
-        ([repl-env env form]
-         (self repl-env env form nil))
-        ([repl-env env [_ & specs :as form] opts]
-         (evaluate-form repl-env env "<cljs repl>"
-                        (with-meta
-                          `(~'ns ~ana/*cljs-ns*
-                             (:import
-                              ~@(map
-                                 (fn [quoted-spec-or-kw]
-                                   (if (keyword? quoted-spec-or-kw)
-                                     quoted-spec-or-kw
-                                     (second quoted-spec-or-kw)))
-                                 specs)))
-                          {:merge true :line 1 :column 1})
-                        identity opts)))
       'load-file load-file-fn
       'clojure.core/load-file load-file-fn
       'load-namespace
@@ -1007,28 +947,38 @@
         :doc "You must currently use the ns form only with the following caveats
 
     * You must use the :only form of :use
-    * :require supports :as and :refer
-      - both options can be skipped
+    * :require supports :as, :refer, and :rename
+      - all options can be skipped
       - in this case a symbol can be used as a libspec directly
         - that is, (:require lib.foo) and (:require [lib.foo]) are both
           supported and mean the same thing
+      - :rename specifies a map from referred var names to different
+        symbols (and can be used to prevent clashes)
       - prefix lists are not supported
-    * The only option for :refer-clojure is :exclude
+    * The only options for :refer-clojure are :exclude and :rename
     * :import is available for importing Google Closure classes
       - ClojureScript types and records should be brought in with :use
         or :require :refer, not :import ed
-    * Macros are written in Clojure, and are referenced via the new
-      :require-macros / :use-macros options to ns
+    * Macros must be defined in a different compilation stage than the one
+      from where they are consumed. One way to achieve this is to define
+      them in one namespace and use them from another. They are referenced
+      via the :require-macros / :use-macros options to ns
       - :require-macros and :use-macros support the same forms that
         :require and :use do
 
   Implicit macro loading: If a namespace is required or used, and that
   namespace itself requires or uses macros from its own namespace, then
   the macros will be implicitly required or used using the same
-  specifications. This oftentimes leads to simplified library usage,
-  such that the consuming namespace need not be concerned about
+  specifications. Furthermore, in this case, macro vars may be included
+  in a :refer or :only spec. This oftentimes leads to simplified library
+  usage, such that the consuming namespace need not be concerned about
   explicitly distinguishing between whether certain vars are functions
-  or macros.
+  or macros. For example:
+
+  (ns testme.core (:require [cljs.test :as test :refer [test-var deftest]]))
+
+  will result in test/is resolving properly, along with the test-var
+  function and the deftest macro being available unqualified.
 
   Inline macro specification: As a convenience, :require can be given
   either :include-macros true or :refer-macros [syms...]. Both desugar
@@ -1046,7 +996,18 @@
   (:require [foo.core :as foo :refer [foo-fn]]
             [woz.core :as woz :refer [woz-fn]])
   (:require-macros [foo.core :as foo]
-                   [woz.core :as woz :refer [app jx]]))"}
+                   [woz.core :as woz :refer [app jx]]))
+
+  Auto-aliasing clojure namespaces: If a non-existing clojure.* namespace
+  is required or used and a matching cljs.* namespace exists, the cljs.*
+  namespace will be loaded and an alias will be automatically established
+  from the clojure.* namespace to the cljs.* namespace. For example:
+
+  (ns testme.core (:require [clojure.test]))
+
+  will be automatically converted to
+
+  (ns testme.core (:require [cljs.test :as clojure.test]))"}
     def {:forms [(def symbol doc-string? init?)]
          :doc "Creates and interns a global var with the name
   of symbol in the current namespace (*ns*) or locates such a var if
@@ -1145,6 +1106,29 @@ itself (not its value) is returned. The reader macro #'x expands to (var x)."}})
     require-macros {:arglists ([& args])
                     :doc "Similar to the require REPL special function but
     only for macros."}
+    use {:arglists ([& args])
+         :doc "Like require, but referring vars specified by the mandatory
+  :only option.
+
+  Example:
+
+  The following would load the library clojure.set while referring
+  the intersection var.
+
+  (use '[clojure.set :only [intersection]])"}
+    use-macros {:arglists ([& args])
+                :doc "Similar to the use REPL special function but
+    only for macros."}
+    refer-clojure {:arglists ([& args])
+                   :doc "Refers to all the public vars of `cljs.core`, subject to
+  filters.
+  Filters can include at most one each of:
+
+  :exclude list-of-symbols
+  :rename map-of-fromsymbol-tosymbol
+
+  Filters can be used to select a subset, via exclusion, or to provide a mapping
+  to a symbol different from the var's name, in order to prevent clashes."}
     import {:arglists ([& import-symbols-or-lists])
             :doc "import-list => (closure-namespace constructor-name-symbols*)
 

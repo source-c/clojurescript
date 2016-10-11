@@ -34,6 +34,8 @@
 
                             cond-> cond->> as-> some-> some->>
 
+                            require use refer-clojure
+
                             if-some when-some test ns-interns ns-unmap var vswap! macroexpand-1 macroexpand
                             #?@(:cljs [alias coercive-not coercive-not= coercive-= coercive-boolean
                                        truth_ js-arguments js-delete js-in js-debugger exists? divide js-mod
@@ -41,7 +43,7 @@
                                        defcurried rfn specify! js-this this-as implements? array js-obj
                                        simple-benchmark gen-apply-to js-str es6-iterable load-file* undefined?
                                        specify copy-arguments goog-define js-comment js-inline-comment
-                                       unsafe-cast])])
+                                       unsafe-cast require-macros use-macros])])
   #?(:cljs (:require-macros [cljs.core :as core]
                             [cljs.support :refer [assert-args]]))
   (:require clojure.walk
@@ -657,24 +659,40 @@
                                                         (if (:as b)
                                                           (conj ret (:as b) gmap)
                                                           ret))))
-                                             bes (reduce
-                                                  (core/fn [bes entry]
-                                                    (reduce #(assoc %1 %2 ((val entry) %2))
-                                                            (dissoc bes (key entry))
-                                                            ((key entry) bes)))
-                                                  (dissoc b :as :or)
-                                                  {:keys #(if (core/keyword? %) % (keyword (core/str %))),
-                                                   :strs core/str, :syms #(core/list `quote %)})]
+                                             bes (core/let [transforms
+                                                            (reduce
+                                                              (core/fn [transforms mk]
+                                                                (if (core/keyword? mk)
+                                                                  (core/let [mkns (namespace mk)
+                                                                        mkn (name mk)]
+                                                                    (core/cond (= mkn "keys") (assoc transforms mk #(keyword (core/or mkns (namespace %)) (name %)))
+                                                                               (= mkn "syms") (assoc transforms mk #(core/list `quote (symbol (core/or mkns (namespace %)) (name %))))
+                                                                               (= mkn "strs") (assoc transforms mk core/str)
+                                                                               :else transforms))
+                                                                  transforms))
+                                                              {}
+                                                              (keys b))]
+                                                   (reduce
+                                                     (core/fn [bes entry]
+                                                       (reduce #(assoc %1 %2 ((val entry) %2))
+                                                         (dissoc bes (key entry))
+                                                         ((key entry) bes)))
+                                                     (dissoc b :as :or)
+                                                     transforms))]
                                    (if (seq bes)
                                      (core/let [bb (key (first bes))
                                                 bk (val (first bes))
-                                                bv (if (contains? defaults bb)
-                                                     (core/list 'cljs.core/get gmap bk (defaults bb))
+                                                local (if #?(:clj  (core/instance? clojure.lang.Named bb)
+                                                             :cljs (cljs.core/implements? INamed bb))
+                                                          (with-meta (symbol nil (name bb)) (meta bb))
+                                                        bb)
+                                                bv (if (contains? defaults local)
+                                                     (core/list 'cljs.core/get gmap bk (defaults local))
                                                      (core/list 'cljs.core/get gmap bk))]
-                                       (recur (core/cond
-                                                (core/symbol? bb) (core/-> ret (conj (if (namespace bb) (symbol (name bb)) bb)) (conj bv))
-                                                (core/keyword? bb) (core/-> ret (conj (symbol (name bb)) bv))
-                                                :else (pb ret bb bv))
+                                       (recur
+                                         (if (core/or (core/keyword? bb) (core/symbol? bb)) ;(ident? bb)
+                                           (core/-> ret (conj local bv))
+                                           (pb ret bb bv))
                                               (next bes)))
                                      ret))))]
                     (core/cond
@@ -1762,7 +1780,10 @@
                                                 ~'__extmap)))
 
                         'IIterable
-                        `(~'-iterator [~gs] (RecordIter. 0 ~gs ~(count base-fields) [~@(map keyword base-fields)]  (-iterator ~'__extmap) ))
+                        `(~'-iterator [~gs]
+                          (RecordIter. 0 ~gs ~(count base-fields) [~@(map keyword base-fields)] (if ~'__extmap
+                                                                                                  (-iterator ~'__extmap)
+                                                                                                  (core/nil-iter))))
 
                         'IPrintWithWriter
                         `(~'-pr-writer [this# writer# opts#]
@@ -1920,20 +1941,27 @@
                                 (core/str "Invalid protocol, " psym
                                   " defines method " mname " with arity 0"))))))
              expand-sig (core/fn [fname slot sig]
-                          `(~sig
-                             (if (and (not (nil? ~(first sig)))
-                                      (not (nil? (. ~(first sig) ~(symbol (core/str "-" slot)))))) ;; Property access needed here.
-                               (. ~(first sig) ~slot ~@sig)
-                               (let [x# (if (nil? ~(first sig)) nil ~(first sig))
-                                     m# (aget ~(fqn fname) (goog/typeOf x#))]
-                                 (if-not (nil? m#)
-                                   (m# ~@sig)
-                                   (let [m# (aget ~(fqn fname) "_")]
-                                     (if-not (nil? m#)
-                                       (m# ~@sig)
-                                       (throw
-                                         (missing-protocol
-                                           ~(core/str psym "." fname) ~(first sig))))))))))
+                          (core/let [sig (core/if-not (every? core/symbol? sig)
+                                           (mapv (core/fn [arg]
+                                                   (core/cond
+                                                     (core/symbol? arg) arg
+                                                     (core/and (map? arg) (some? (:as arg))) (:as arg)
+                                                     :else (gensym))) sig)
+                                           sig)]
+                            `(~sig
+                              (if (and (not (nil? ~(first sig)))
+                                    (not (nil? (. ~(first sig) ~(symbol (core/str "-" slot)))))) ;; Property access needed here.
+                                (. ~(first sig) ~slot ~@sig)
+                                (let [x# (if (nil? ~(first sig)) nil ~(first sig))
+                                      m# (aget ~(fqn fname) (goog/typeOf x#))]
+                                  (if-not (nil? m#)
+                                    (m# ~@sig)
+                                    (let [m# (aget ~(fqn fname) "_")]
+                                      (if-not (nil? m#)
+                                        (m# ~@sig)
+                                        (throw
+                                          (missing-protocol
+                                            ~(core/str psym "." fname) ~(first sig)))))))))))
              psym (core/-> psym
                     (vary-meta update-in [:jsdoc] conj
                       "@interface")
@@ -2699,6 +2727,30 @@
 (core/defmacro locking
   [x & forms]
   `(do ~@forms))
+
+(core/defmacro require
+  [& specs]
+  `(~'ns* ~(cons :require specs)))
+
+(core/defmacro require-macros
+  [& specs]
+  `(~'ns* ~(cons :require-macros specs)))
+
+(core/defmacro use
+  [& specs]
+  `(~'ns* ~(cons :use specs)))
+
+(core/defmacro use-macros
+  [& specs]
+  `(~'ns* ~(cons :use-macros specs)))
+
+(core/defmacro import
+  [& specs]
+  `(~'ns* ~(cons :import specs)))
+
+(core/defmacro refer-clojure
+  [& specs]
+  `(~'ns* ~(cons :refer-clojure specs)))
 
 ;; INTERNAL - do not use, only for Node.js
 (core/defmacro load-file* [f]

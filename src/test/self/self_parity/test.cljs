@@ -1,8 +1,16 @@
+;; Copyright (c) Rich Hickey. All rights reserved.
+;; The use and distribution terms for this software are covered by the
+;; Eclipse Public License 1.0 (http://opensource.org/licenses/eclipse-1.0.php)
+;; which can be found in the file epl-v10.html at the root of this distribution.
+;; By using this software in any fashion, you are agreeing to be bound by
+;; the terms of this license.
+;; You must not remove this notice, or any other, from this software.
+
 (ns
   ^{:doc "Builds and runs the ClojureScript compiler test suite
   in self-host mode, ensuring parity of bootstrapped ClojureScript
   with JVM based ClojureScript.
-  
+
   This involves dynamically loading the test suite files at runtime,
   excercising that they can be compiled by the bootstrapped
   ClojureScript compiler, and also running the resulting tests."}
@@ -19,7 +27,7 @@
                 "src/main/clojure"
                 "src/test/cljs"])
 
-(defn init-runtime 
+(defn init-runtime
   "Initializes the runtime so that we can use the cljs.user
   namespace and so that Google Closure is set up to work
   properly with :optimizations :none."
@@ -65,7 +73,7 @@
 ;; Facilities for loading Closure deps
 
 (defn closure-index
-  "Builds an index of Closure files. Similar to 
+  "Builds an index of Closure files. Similar to
   cljs.js-deps/goog-dependencies*"
   []
   (let [paths-to-provides
@@ -123,6 +131,7 @@
       (fn [source]
         (if source
           (let [source-cb-value {:lang   (filename->lang filename)
+                                 :file   filename
                                  :source source}]
             (if (or (string/ends-with? filename ".cljs")
                     (string/ends-with? filename ".cljc"))
@@ -160,7 +169,8 @@
   technical issues)."
   [name macros]
   ((if macros
-     #{'cljs.pprint
+     #{'cljs.core
+       'cljs.pprint
        'cljs.env.macros
        'cljs.analyzer.macros
        'cljs.compiler.macros}
@@ -171,7 +181,8 @@
        'cljs.core
        'cljs.env
        'cljs.pprint
-       'cljs.tools.reader}) name))
+       'cljs.tools.reader
+       'clojure.walk}) name))
 
 ;; An atom to keep track of things we've already loaded
 (def loaded (atom #{}))
@@ -204,7 +215,7 @@
 
 (def vm (nodejs/require "vm"))
 
-(defn node-eval 
+(defn node-eval
   "Evaluates JavaScript in node."
   [{:keys [name source]}]
   (if-not js/COMPILED
@@ -215,7 +226,7 @@
 
 (def load-fn (make-load-fn src-paths node-read-file))
 
-(defn eval-form 
+(defn eval-form
   "Evaluates a supplied form in a given namespace,
   calling back with the evaluation result."
   [st ns form cb]
@@ -228,7 +239,9 @@
      :verbose false}
     cb))
 
-(defn run-tests 
+;; Test suite runner
+
+(defn run-tests
   "Runs the tests."
   []
   ;; Ideally we'd just load test_runner.cljs, but a few namespace tests
@@ -238,12 +251,20 @@
     (eval-form st 'cljs.user
       '(ns parity.core
          (:require [cljs.test :refer-macros [run-tests]]
+                   [cljs.primitives-test]
+                   [cljs.destructuring-test]
+                   [cljs.new-new-test]
+                   [cljs.printing-test]
+                   [cljs.seqs-test]
+                   [cljs.collections-test]
+                   [cljs.hashing-test]
                    [cljs.core-test :as core-test]
                    [cljs.reader-test]
                    [cljs.binding-test]
                    #_[cljs.ns-test]
                    [clojure.string-test]
                    [clojure.data-test]
+                   [clojure.walk-test]
                    [cljs.macro-test]
                    [cljs.letfn-test]
                    [foo.ns-shadow-test]
@@ -252,16 +273,30 @@
                    #_[cljs.keyword-test]
                    [cljs.import-test]
                    [cljs.ns-test.foo]
-                   #_[cljs.pprint]))
+                   #_[cljs.pprint]
+                   #_[cljs.pprint-test]
+                   [cljs.spec-test]
+                   [cljs.clojure-alias-test]
+                   [cljs.hash-map-test]
+                   [cljs.syntax-quote-test]
+                   [cljs.predicates-test]))
       (fn [{:keys [value error]}]
         (if error
           (prn error)
           (eval-form st 'parity.core
             '(run-tests
+               'cljs.primitives-test
+               'cljs.destructuring-test
+               'cljs.new-new-test
+               'cljs.printing-test
+               'cljs.seqs-test
+               'cljs.collections-test
+               'cljs.hashing-test
                'cljs.core-test
                'cljs.reader-test
                'clojure.string-test
                'clojure.data-test
+               'clojure.walk-test
                'cljs.letfn-test
                'cljs.reducers-test
                'cljs.binding-test
@@ -272,7 +307,13 @@
                'cljs.ns-test.foo
                'foo.ns-shadow-test
                'cljs.import-test
-               #_'cljs.pprint)
+               #_'cljs.pprint
+               #_'cljs.pprint-test
+               'cljs.spec-test
+               'cljs.clojure-alias-test
+               'cljs.hash-map-test
+               'cljs.syntax-quote-test
+               'cljs.predicates-test)
             (fn [{:keys [value error]}]
               (when error
                 (prn error)))))))))

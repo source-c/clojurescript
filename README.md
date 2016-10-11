@@ -1,17 +1,19 @@
 ## What is ClojureScript? ##
 
-ClojureScript is a compiler for [Clojure](http://clojure.org) that targets JavaScript. It is designed to emit JavaScript code which is compatible with the advanced compilation mode of the [Google Closure](https://developers.google.com/closure/compiler/) optimizing compiler.
+[ClojureScript](http://clojurescript.org) is a compiler for [Clojure](http://clojure.org) that targets JavaScript. It is designed to emit JavaScript code which is compatible with the advanced compilation mode of the [Google Closure](https://developers.google.com/closure/compiler/) optimizing compiler.
+
+Official web site: http://clojurescript.org
 
 ## Releases and dependency information ##
 
-Latest stable release: 1.9.36
+Latest stable release: 1.9.229
 
 * [All released versions](http://search.maven.org/#search%7Cgav%7C1%7Cg%3A%22org.clojure%22%20AND%20a%3A%22clojurescript%22)
 
 [Leiningen](http://github.com/technomancy/leiningen/) dependency information:
 
 ```
-[org.clojure/clojurescript "1.9.36"]
+[org.clojure/clojurescript "1.9.229"]
 ```
 
 [Maven](http://maven.apache.org) dependency information:
@@ -20,7 +22,7 @@ Latest stable release: 1.9.36
 <dependency>
   <groupId>org.clojure</groupId>
   <artifactId>clojurescript</artifactId>
-  <version>1.9.36</version>
+  <version>1.9.229</version>
 </dependency>
 ```
 
@@ -28,10 +30,10 @@ Latest stable release: 1.9.36
 
 * [Compare with JavaScript](http://himera.herokuapp.com/synonym.html)
 * [Try it online](http://himera.herokuapp.com/index.html)
-* Read the [Quick Start](https://github.com/clojure/clojurescript/wiki/Quick-Start) guide.
-* Read the [Documentation](https://github.com/clojure/clojurescript/wiki).
-* Try a [tutorial](https://github.com/clojure/clojurescript/wiki).
-* [Companies using ClojureScript](https://github.com/clojure/clojurescript/wiki/Companies-Using-ClojureScript)
+* Read the [Quick Start](http://clojurescript.org/guides/quick-start) guide.
+* Read the [Documentation](http://clojurescript.org).
+* Try a [tutorial](http://clojurescript.org/guides).
+* [Companies using ClojureScript](http://clojurescript.org/community/companies)
 
 ## Questions, Feedback? ##
 

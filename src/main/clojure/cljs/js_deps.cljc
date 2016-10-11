@@ -1,3 +1,11 @@
+;; Copyright (c) Rich Hickey. All rights reserved.
+;; The use and distribution terms for this software are covered by the
+;; Eclipse Public License 1.0 (http://opensource.org/licenses/eclipse-1.0.php)
+;; which can be found in the file epl-v10.html at the root of this distribution.
+;; By using this software in any fashion, you are agreeing to be bound by
+;; the terms of this license.
+;; You must not remove this notice, or any other, from this software.
+
 (ns cljs.js-deps
   (:require [clojure.java.io :as io]
             [clojure.string :as string])
@@ -133,7 +141,18 @@ case."
                          (fn [index' provide]
                            (if (:foreign dep)
                              (update-in index' [provide] merge dep)
-                             (assoc index' provide dep)))
+                             ;; when building the dependency index, we need to
+                             ;; avoid overwriting a CLJS dep with a CLJC dep of
+                             ;; the same namespace - António Monteiro
+                             (let [file (when-let [f (or (:source-file dep) (:file dep))]
+                                          (.toString f))
+                                   ext (when file
+                                         (.substring file (inc (.lastIndexOf file "."))))]
+                               (update-in index' [provide]
+                                 (fn [d]
+                                   (if (and (= ext "cljc") (some? d))
+                                     d
+                                     dep))))))
                          index provides)
                        index)]
         (if (:foreign dep)

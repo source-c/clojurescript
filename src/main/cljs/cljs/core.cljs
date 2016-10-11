@@ -7,7 +7,9 @@
 ;   You must not remove this notice, or any other, from this software.
 
 (ns cljs.core
-  (:require [goog.string :as gstring]
+  (:require goog.math.Long
+            goog.math.Integer
+            [goog.string :as gstring]
             [goog.object :as gobject]
             [goog.array :as garray])
   (:import [goog.string StringBuffer]))
@@ -228,6 +230,10 @@
   "Returns true if x is a JavaScript char."
   [x]
   (gstring/isUnicodeChar x))
+
+(defn ^boolean any?
+  "Returns true if given any argument."
+  [x] true)
 
 (set! *unchecked-if* true)
 (defn ^boolean native-satisfies?
@@ -1002,6 +1008,8 @@
   Object
   (isMacro [_]
     (. (val) -cljs$lang$macro))
+  (toString [_]
+    (str "#'" sym))
   IDeref
   (-deref [_] (val))
   IMeta
@@ -1262,6 +1270,23 @@
     (if (instance? js/Date other)
       (garray/defaultCompare (.valueOf this) (.valueOf other))
       (throw (js/Error. (str "Cannot compare " this " to " other))))))
+
+(defprotocol Inst
+  (inst-ms* [inst]))
+
+(extend-protocol Inst
+  js/Date
+  (inst-ms* [inst] (.getTime inst)))
+
+(defn inst-ms
+  "Return the number of milliseconds since January 1, 1970, 00:00:00 GMT"
+  [inst]
+  (inst-ms* inst))
+
+(defn ^boolean inst?
+  "Return true if x satisfies Inst"
+  [x]
+  (satisfies? Inst x))
 
 (extend-type number
   IEquiv
@@ -1717,7 +1742,7 @@ reduces them without incurring seq initialization"
   ([coll n]
     (cond
       (not (number? n))
-      (throw (js/Error. "index argument to nth must be a number"))
+      (throw (js/Error. "Index argument to nth must be a number"))
 
       (nil? coll)
       coll
@@ -1726,12 +1751,14 @@ reduces them without incurring seq initialization"
       (-nth ^not-native coll n)
 
       (array? coll)
-      (when (< n (.-length coll))
-        (aget coll n))
+      (if (and (>= n 0) (< n (.-length coll)))
+        (aget coll n)
+        (throw (js/Error. "Index out of bounds")))
 
       (string? coll)
-      (when (< n (.-length coll))
-        (.charAt coll n))
+      (if (and (>= n 0) (< n (.-length coll)))
+        (.charAt coll n)
+        (throw (js/Error. "Index out of bounds")))
 
       (implements? ISeq coll)
       (linear-traversal-nth coll n)
@@ -1745,7 +1772,7 @@ reduces them without incurring seq initialization"
   ([coll n not-found]
     (cond
       (not (number? n))
-      (throw (js/Error. "index argument to nth must be a number."))
+      (throw (js/Error. "Index argument to nth must be a number."))
 
       (nil? coll)
       not-found
@@ -1754,12 +1781,12 @@ reduces them without incurring seq initialization"
       (-nth ^not-native coll n not-found)
 
       (array? coll)
-      (if (< n (.-length coll))
+      (if (and (>= n 0) (< n (.-length coll)))
         (aget coll n)
         not-found)
 
       (string? coll)
-      (if (< n (.-length coll))
+      (if (and (>= n 0) (< n (.-length coll)))
         (.charAt coll n)
         not-found)
 
@@ -1794,7 +1821,7 @@ reduces them without incurring seq initialization"
           (aget o (int k)))
         
         (string? o)
-        (when (< k (.-length o))
+        (when (and (some? k) (< k (.-length o)))
           (aget o (int k)))
 
         (native-satisfies? ILookup o)
@@ -1809,12 +1836,12 @@ reduces them without incurring seq initialization"
 
         (array? o)
         (if (< k (.-length o))
-          (aget o k)
+          (aget o (int k))
           not-found)
-        
+
         (string? o)
         (if (< k (.-length o))
-          (aget o k)
+          (aget o (int k))
           not-found)
 
         (native-satisfies? ILookup o)
@@ -2064,6 +2091,10 @@ reduces them without incurring seq initialization"
   "Returns true if x is the value true, false otherwise."
   [x] (cljs.core/true? x))
 
+(defn ^boolean boolean?
+  "Return true if x is a Boolean"
+  [x] (or (cljs.core/true? x) (cljs.core/false? x)))
+
 (defn ^boolean undefined?
   "Returns true if x identical to the JavaScript undefined value."
   [x]
@@ -2095,12 +2126,81 @@ reduces them without incurring seq initialization"
   (or (fn? f) (satisfies? IFn f)))
 
 (defn ^boolean integer?
-  "Returns true if n is an integer."
+  "Returns true if n is a JavaScript number with no decimal part."
   [n]
   (and (number? n)
        (not ^boolean (js/isNaN n))
        (not (identical? n js/Infinity))
        (== (js/parseFloat n) (js/parseInt n 10))))
+
+(defn ^boolean int?
+  "Return true if x satisfies integer? or is an instance of goog.math.Integer
+   or goog.math.Long."
+  [x]
+  (or (integer? x)
+      (instance? goog.math.Integer x)
+      (instance? goog.math.Long x)))
+
+(defn ^boolean pos-int?
+  "Return true if x satisfies int? and is positive."
+  [x]
+  (cond
+    (integer? x) (pos? x)
+
+    (instance? goog.math.Integer x)
+    (and (not (.isNegative x))
+         (not (.isZero x)))
+
+    (instance? goog.math.Long x)
+    (and (not (.isNegative x))
+         (not (.isZero x)))
+
+    :else false))
+
+(defn ^boolean neg-int?
+  "Return true if x satisfies int? and is positive."
+  [x]
+  (cond
+    (integer? x) (neg? x)
+
+    (instance? goog.math.Integer x)
+    (.isNegative x)
+
+    (instance? goog.math.Long x)
+    (.isNegative x)
+
+    :else false))
+
+(defn ^boolean nat-int?
+  "Return true if x satisfies int? and is a natural integer value."
+  [x]
+  (cond
+    (integer? x)
+    (or (not (neg? x)) (zero? x))
+
+    (instance? goog.math.Integer x)
+    (or (not (.isNegative x)) (.isZero x))
+
+    (instance? goog.math.Long x)
+    (or (not (.isNegative x)) (.isZero x))
+
+    :else false))
+
+(defn ^boolean float?
+  "Returns true for JavaScript numbers, false otherwise."
+  [x]
+  (number? x))
+
+(defn ^boolean double?
+  "Returns true for JavaScript numbers, false otherwise."
+  [x]
+  (number? x))
+
+(defn ^boolean infinite?
+  "Returns true for Infinity and -Infinity values."
+  [x]
+  (or (identical? x js/Number.POSITIVE_INFINITY)
+      (identical? x js/Number.NEGATIVE_INFINITY)))
 
 (defn ^boolean contains?
   "Returns true if key is present in the given collection, otherwise
@@ -3086,6 +3186,34 @@ reduces them without incurring seq initialization"
     (-namespace ^not-native x)
     (throw (js/Error. (str "Doesn't support namespace: " x)))))
 
+(defn ^boolean ident?
+  "Return true if x is a symbol or keyword"
+  [x] (or (keyword? x) (symbol? x)))
+
+(defn ^boolean simple-ident?
+  "Return true if x is a symbol or keyword without a namespace"
+  [x] (and (ident? x) (nil? (namespace x))))
+
+(defn ^boolean qualified-ident?
+  "Return true if x is a symbol or keyword with a namespace"
+  [x] (and (ident? x) (namespace x) true))
+
+(defn ^boolean simple-symbol?
+  "Return true if x is a symbol without a namespace"
+  [x] (and (symbol? x) (nil? (namespace x))))
+
+(defn ^boolean qualified-symbol?
+  "Return true if x is a symbol with a namespace"
+  [x] (and (symbol? x) (namespace x) true))
+
+(defn ^boolean simple-keyword?
+  "Return true if x is a keyword without a namespace"
+  [x] (and (keyword? x) (nil? (namespace x))))
+
+(defn ^boolean qualified-keyword?
+  "Return true if x is a keyword with a namespace"
+  [x] (and (keyword? x) (namespace x) true))
+
 (defn keyword
   "Returns a Keyword with the given namespace and name.  Do not use :
   in the keyword strings, it will be added automatically."
@@ -3098,7 +3226,16 @@ reduces them without incurring seq initialization"
                              (if (== (alength parts) 2)
                                (Keyword. (aget parts 0) (aget parts 1) name nil)
                                (Keyword. nil (aget parts 0) name nil)))))
-  ([ns name] (Keyword. ns name (str (when ns (str ns "/")) name) nil)))
+  ([ns name]
+   (let [ns   (cond
+                (keyword? ns) (cljs.core/name ns)
+                (symbol? ns)  (cljs.core/name ns)
+                :else ns)
+         name (cond
+                (keyword? name) (cljs.core/name name)
+                (symbol? name) (cljs.core/name name)
+                :else name)]
+     (Keyword. ns name (str (when ns (str ns "/")) name) nil))))
 
 
 (deftype LazySeq [meta ^:mutable fn ^:mutable s ^:mutable __hash]
@@ -3435,13 +3572,17 @@ reduces them without incurring seq initialization"
              (aset a i init-val-or-seq))
            a)))))
 
-(defn- bounded-count [s n]
-  (if (counted? s)
-    (count s)
-    (loop [s s i n sum 0]
-      (if (and (pos? i) (seq s))
-        (recur (next s) (dec i) (inc sum))
-        sum))))
+(defn bounded-count
+  "If coll is counted? returns its count, else will count at most the first n
+   elements of coll using its seq"
+  {:added "1.9"}
+  [n coll]
+  (if (counted? coll)
+    (count coll)
+    (loop [i 0 s (seq coll)]
+      (if (and (not (nil? s)) (< i n))
+        (recur (inc i) (next s))
+        i))))
 
 (defn spread
   [arglist]
@@ -3565,7 +3706,7 @@ reduces them without incurring seq initialization"
   ([f args]
      (let [fixed-arity (.-cljs$lang$maxFixedArity f)]
        (if (.-cljs$lang$applyTo f)
-         (let [bc (bounded-count args (inc fixed-arity))]
+         (let [bc (bounded-count (inc fixed-arity) args)]
           (if (<= bc fixed-arity)
             (apply-to f bc args)
             (.cljs$lang$applyTo f args)))
@@ -3574,7 +3715,7 @@ reduces them without incurring seq initialization"
      (let [arglist (list* x args)
            fixed-arity (.-cljs$lang$maxFixedArity f)]
        (if (.-cljs$lang$applyTo f)
-         (let [bc (bounded-count arglist (inc fixed-arity))]
+         (let [bc (bounded-count (inc fixed-arity) arglist)]
           (if (<= bc fixed-arity)
             (apply-to f bc arglist)
             (.cljs$lang$applyTo f arglist)))
@@ -3583,7 +3724,7 @@ reduces them without incurring seq initialization"
      (let [arglist (list* x y args)
            fixed-arity (.-cljs$lang$maxFixedArity f)]
        (if (.-cljs$lang$applyTo f)
-         (let [bc (bounded-count arglist (inc fixed-arity))]
+         (let [bc (bounded-count (inc fixed-arity) arglist)]
           (if (<= bc fixed-arity)
             (apply-to f bc arglist)
             (.cljs$lang$applyTo f arglist)))
@@ -3592,7 +3733,7 @@ reduces them without incurring seq initialization"
      (let [arglist (list* x y z args)
            fixed-arity (.-cljs$lang$maxFixedArity f)]
        (if (.-cljs$lang$applyTo f)
-         (let [bc (bounded-count arglist (inc fixed-arity))]
+         (let [bc (bounded-count (inc fixed-arity) arglist)]
           (if (<= bc fixed-arity)
             (apply-to f bc arglist)
             (.cljs$lang$applyTo f arglist)))
@@ -3601,7 +3742,7 @@ reduces them without incurring seq initialization"
      (let [arglist (cons a (cons b (cons c (cons d (spread args)))))
            fixed-arity (.-cljs$lang$maxFixedArity f)]
        (if (.-cljs$lang$applyTo f)
-         (let [bc (bounded-count arglist (inc fixed-arity))]
+         (let [bc (bounded-count (inc fixed-arity) arglist)]
           (if (<= bc fixed-arity)
             (apply-to f bc arglist)
             (.cljs$lang$applyTo f arglist)))
@@ -4133,7 +4274,8 @@ reduces them without incurring seq initialization"
   (if (instance? Atom a)
     (let [validate (.-validator a)]
       (when-not (nil? validate)
-        (assert (validate new-value) "Validator rejected reference state"))
+        (when-not (validate new-value)
+          (throw (js/Error. "Validator rejected reference state"))))
       (let [old-value (.-state a)]
         (set! (.-state a) new-value)
         (when-not (nil? (.-watches a))
@@ -4687,13 +4829,11 @@ reduces them without incurring seq initialization"
      (loop [sentinel lookup-sentinel
             m m
             ks (seq ks)]
-       (if ks
-         (if (not (satisfies? ILookup m))
-           not-found
-           (let [m (get m (first ks) sentinel)]
-             (if (identical? sentinel m)
-               not-found
-               (recur sentinel m (next ks)))))
+       (if-not (nil? ks)
+         (let [m (get m (first ks) sentinel)]
+           (if (identical? sentinel m)
+             not-found
+             (recur sentinel m (next ks))))
          m))))
 
 (defn assoc-in
@@ -5665,10 +5805,9 @@ reduces them without incurring seq initialization"
     (when (map? y)
       ; assume all maps are counted
       (when (== (count x) (count y))
-        (every? identity
-                (map (fn [xkv] (= (get y (first xkv) never-equiv)
-                                  (second xkv)))
-                     x))))))
+        (every? (fn [xkv] (= (get y (first xkv) never-equiv)
+                             (second xkv)))
+                x)))))
 
 
 (defn- scan-array [incr k array]
@@ -6888,9 +7027,10 @@ reduces them without incurring seq initialization"
       (first s)))
 
   (-rest [coll]
-    (if (nil? s)
-      (create-inode-seq nodes (+ i 2) nil)
-      (create-inode-seq nodes i (next s))))
+    (let [ret (if (nil? s)
+                (create-inode-seq nodes (+ i 2) nil)
+                (create-inode-seq nodes i (next s)))]
+      (if-not (nil? ret) ret ())))
 
   ISeqable
   (-seq [this] this)
@@ -6954,7 +7094,9 @@ reduces them without incurring seq initialization"
   ISequential
   ISeq
   (-first [coll] (first s))
-  (-rest  [coll] (create-array-node-seq nil nodes i (next s)))
+  (-rest  [coll]
+    (let [ret (create-array-node-seq nil nodes i (next s))]
+      (if-not (nil? ret) ret ())))
 
   ISeqable
   (-seq [this] this)
@@ -6990,12 +7132,12 @@ reduces them without incurring seq initialization"
 (deftype HashMapIter [nil-val root-iter ^:mutable seen]
   Object
   (hasNext [_]
-    (and ^boolean seen ^boolean (.hasNext root-iter)))
+    (or (not seen) ^boolean (.hasNext root-iter)))
   (next [_]
     (if-not ^boolean seen
       (do
         (set! seen true)
-        nil-val)
+        [nil nil-val])
       (.next root-iter)))
   (remove [_] (js/Error. "Unsupported operation")))
 
@@ -7026,7 +7168,7 @@ reduces them without incurring seq initialization"
 
   IIterable
   (-iterator [coll]
-    (let [root-iter (if ^boolean root (-iterator root) nil-iter)]
+    (let [root-iter (if ^boolean root (-iterator root) (nil-iter))]
       (if has-nil?
         (HashMapIter. nil-val root-iter false)
         root-iter)))
@@ -9597,7 +9739,7 @@ reduces them without incurring seq initialization"
   vectors, and JavaScript objects into ClojureScript maps.  With
   option ':keywordize-keys true' will convert object fields from
   strings to keywords."
-  ([x] (js->clj x {:keywordize-keys false}))
+  ([x] (js->clj x :keywordize-keys false))
   ([x & opts]
     (let [{:keys [keywordize-keys]} opts
           keyfn (if keywordize-keys keyword str)
@@ -9823,17 +9965,17 @@ reduces them without incurring seq initialization"
      false)))
 
 (defn- dominates
-  [x y prefer-table]
-  (or (prefers* x y prefer-table) (isa? x y)))
+  [x y prefer-table hierarchy]
+  (or (prefers* x y prefer-table) (isa? hierarchy x y)))
 
 (defn- find-and-cache-best-method
   [name dispatch-val hierarchy method-table prefer-table method-cache cached-hierarchy]
   (let [best-entry (reduce (fn [be [k _ :as e]]
                              (if (isa? @hierarchy dispatch-val k)
-                               (let [be2 (if (or (nil? be) (dominates k (first be) prefer-table))
+                               (let [be2 (if (or (nil? be) (dominates k (first be) prefer-table @hierarchy))
                                            e
                                            be)]
-                                 (when-not (dominates (first be2) k prefer-table)
+                                 (when-not (dominates (first be2) k prefer-table @hierarchy)
                                    (throw (js/Error.
                                            (str "Multiple methods in multimethod '" name
                                                 "' match dispatch value: " dispatch-val " -> " k
@@ -10090,8 +10232,11 @@ reduces them without incurring seq initialization"
   [multifn] (-dispatch-fn multifn))
 
 ;; UUID
+(defprotocol IUUID "A marker protocol for UUIDs")
 
 (deftype UUID [uuid ^:mutable __hash]
+  IUUID
+
   Object
   (toString [_] uuid)
   (equiv [this other]
@@ -10130,6 +10275,9 @@ reduces them without incurring seq initialization"
              (hex) (hex) (hex) (hex)
              (hex) (hex) (hex) (hex)
              (hex) (hex) (hex) (hex))))))
+
+(defn ^boolean uuid?
+  [x] (implements? IUUID x))
 
 ;;; ExceptionInfo
 
@@ -10213,7 +10361,7 @@ reduces them without incurring seq initialization"
   [x]
   (contains?
     '#{if def fn* do let* loop* letfn* throw try catch finally
-       recur new set! ns deftype* defrecord* . js* & quote var}
+       recur new set! ns deftype* defrecord* . js* & quote var ns*}
     x))
 
 (defn test
@@ -10359,9 +10507,15 @@ reduces them without incurring seq initialization"
         ".."
         (demunge-str (str name))))))
 
-(defn- ns-lookup [ns-obj k]
+;; -----------------------------------------------------------------------------
+;; Bootstrap helpers - incompatible with advanced compilation
+
+(defn- ns-lookup
+  "Bootstrap only."
+  [ns-obj k]
   (fn [] (gobject/get ns-obj k)))
 
+;; Bootstrap only
 (deftype Namespace [obj name]
   Object
   (findInternedVar [this sym]
@@ -10383,16 +10537,20 @@ reduces them without incurring seq initialization"
     (hash name)))
 
 (def
-  ^{:jsdoc ["@type {*}"]}
+  ^{:doc "Bootstrap only." :jsdoc ["@type {*}"]}
   NS_CACHE nil)
 
-(defn- find-ns-obj* [ctxt xs]
+(defn- find-ns-obj*
+  "Bootstrap only."
+  [ctxt xs]
   (cond
     (nil? ctxt) nil
     (nil? xs) ctxt
     :else (recur (gobject/get ctxt (first xs)) (next xs))))
 
-(defn find-ns-obj [ns]
+(defn find-ns-obj
+  "Bootstrap only."
+  [ns]
   (let [munged-ns (munge (str ns))
         segs (.split munged-ns ".")]
     (case *target*
@@ -10411,7 +10569,9 @@ reduces them without incurring seq initialization"
       "default" (find-ns-obj* goog/global segs)
       (throw (js/Error. (str "find-ns-obj not supported for target " *target*))))))
 
-(defn ns-interns* [sym]
+(defn ns-interns*
+  "Bootstrap only."
+  [sym]
   (let [ns-obj (find-ns-obj sym)
         ns     (Namespace. ns-obj sym)]
     (letfn [(step [ret k]
@@ -10422,12 +10582,15 @@ reduces them without incurring seq initialization"
       (reduce step {} (js-keys ns-obj)))))
 
 (defn create-ns
+  "Bootstrap only."
   ([sym]
    (create-ns sym (find-ns-obj sym)))
   ([sym ns-obj]
    (Namespace. ns-obj sym)))
 
-(defn find-ns [ns]
+(defn find-ns
+  "Bootstrap only."
+  [ns]
   (when (nil? NS_CACHE)
     (set! NS_CACHE (atom {})))
   (let [the-ns (get @NS_CACHE ns)]
@@ -10439,7 +10602,9 @@ reduces them without incurring seq initialization"
             (swap! NS_CACHE assoc ns new-ns)
             new-ns))))))
 
-(defn find-macros-ns [ns]
+(defn find-macros-ns
+  "Bootstrap only."
+  [ns]
   (when (nil? NS_CACHE)
     (set! NS_CACHE (atom {})))
   (let [the-ns (get @NS_CACHE ns)]
@@ -10455,5 +10620,7 @@ reduces them without incurring seq initialization"
            (swap! NS_CACHE assoc ns new-ns)
            new-ns))))))
 
-(defn ns-name [ns-obj]
+(defn ns-name
+  "Bootstrap only."
+  [ns-obj]
   (.-name ns-obj))

@@ -1,7 +1,16 @@
+;; Copyright (c) Rich Hickey. All rights reserved.
+;; The use and distribution terms for this software are covered by the
+;; Eclipse Public License 1.0 (http://opensource.org/licenses/eclipse-1.0.php)
+;; which can be found in the file epl-v10.html at the root of this distribution.
+;; By using this software in any fashion, you are agreeing to be bound by
+;; the terms of this license.
+;; You must not remove this notice, or any other, from this software.
+
 (ns self-host.test
   (:require [cljs.test :as test
              :refer-macros [run-tests deftest testing is async]]
             [cljs.js :as cljs]
+            [cljs.analyzer :as ana]
             [clojure.string :as string]
             [cljs.nodejs :as nodejs]))
 
@@ -46,6 +55,27 @@
 
 (defn elide-env [env ast opts]
   (dissoc ast :env))
+
+(defn var-ast
+  "Given an already derefed compiler state plus the symbols of a
+  namespace and a var (e.g. 'clojure.string and 'trim) , return the var
+  AST representation or nil if not found, probably because not required
+  yet.
+
+  The 1-arity function does the splitting in case of a fully qualified
+  symbol (e.g. 'clojure.string/trim)."
+  ([st sym]
+   (var-ast st (symbol (namespace sym)) (symbol (name sym))))
+  ([st ns-sym sym]
+   (get-in st [:cljs.analyzer/namespaces ns-sym :defs sym])))
+
+(defn file->lang
+  "Converts a file path to a :lang keyword by inspecting the file
+   extension."
+  [file-path]
+  (if (string/ends-with? file-path ".js")
+    :js
+    :clj))
 
 (defn str-evals-to
   "Checks that a string evaluates to an expected value."
@@ -349,7 +379,7 @@
 
 (deftest test-load-and-invoke-macros
   (async done
-    (let [l (latch 9 done)]
+    (let [l (latch 12 done)]
       ;; Normal require macros
       (let [st (cljs/empty-state)]
         (cljs/eval-str st
@@ -526,6 +556,70 @@
               (fn [{:keys [error value]}]
                 (is (nil? error))
                 (is (= 300 value))
+                (inc! l))))))
+      (let [st (cljs/empty-state)]
+        ;; Rely on implicit macro inference (ns loads its own macros)
+        (cljs/eval-str st
+          "(ns cljs.user (:require [foo.core :refer [add]]))"
+          nil
+          {:eval node-eval
+           :load (fn [{:keys [macros]} cb]
+                   (if macros
+                     (cb {:lang :clj :source "(ns foo.core) (defmacro add [a b] `(+ ~a ~b))"})
+                     (cb {:lang :clj :source "(ns foo.core (:require-macros foo.core))"})))}
+          (fn [{:keys [value error]}]
+            (is (nil? error))
+            (cljs/eval-str st
+              "(add 110 210)"
+              nil
+              {:eval    node-eval
+               :context :expr}
+              (fn [{:keys [error value]}]
+                (is (nil? error))
+                (is (= 320 value))
+                (inc! l))))))
+      (let [st (cljs/empty-state)]
+        ;; Rely on implicit macro inference for renames (ns loads its own macros)
+        (cljs/eval-str st
+          "(ns cljs.user (:require [foo.core :refer [add] :rename {add plus}]))"
+          nil
+          {:eval node-eval
+           :load (fn [{:keys [macros]} cb]
+                   (if macros
+                     (cb {:lang :clj :source "(ns foo.core) (defmacro add [a b] `(+ ~a ~b))"})
+                     (cb {:lang :clj :source "(ns foo.core (:require-macros foo.core))"})))}
+          (fn [{:keys [value error]}]
+            (is (nil? error))
+            (cljs/eval-str st
+              "(plus 110 210)"
+              nil
+              {:eval    node-eval
+               :context :expr}
+              (fn [{:keys [error value]}]
+                (is (nil? error))
+                (is (= 320 value))
+                (inc! l))))))
+      (let [st (cljs/empty-state)]
+        ;; Rely on implicit macro loading (ns loads its own macros), with an alias
+        ;; CLJS-1657
+        (cljs/eval-str st
+          "(ns cljs.user (:require [foo.core :as foo]))"
+          nil
+          {:eval node-eval
+           :load (fn [{:keys [macros]} cb]
+                   (if macros
+                     (cb {:lang :clj :source "(ns foo.core) (defmacro add [a b] `(+ ~a ~b))"})
+                     (cb {:lang :clj :source "(ns foo.core (:require-macros foo.core))"})))}
+          (fn [{:keys [value error]}]
+            (is (nil? error))
+            (cljs/eval-str st
+              "(foo/add 300 500)"
+              nil
+              {:eval    node-eval
+               :context :expr}
+              (fn [{:keys [error value]}]
+                (is (nil? error))
+                (is (= 800 value))
                 (inc! l)))))))))
 
 (deftest test-eval-str-with-require-macros
@@ -708,7 +802,7 @@
         (str-evals-to st l [1 1 1 1 1]
           "(let [an-array (int-array 5 0)] (js->clj (amap an-array idx ret (+ 1 (aget an-array idx)))))" {:ns 'foo.core})))))
 
-#_(deftest test-eval-str-with-require
+(deftest test-eval-str-with-require
   (async done
     (let [l (latch 3 done)]
       (cljs/eval-str st

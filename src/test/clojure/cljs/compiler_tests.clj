@@ -1,3 +1,11 @@
+;; Copyright (c) Rich Hickey. All rights reserved.
+;; The use and distribution terms for this software are covered by the
+;; Eclipse Public License 1.0 (http://opensource.org/licenses/eclipse-1.0.php)
+;; which can be found in the file epl-v10.html at the root of this distribution.
+;; By using this software in any fashion, you are agreeing to be bound by
+;; the terms of this license.
+;; You must not remove this notice, or any other, from this software.
+
 (ns cljs.compiler-tests
   (:use clojure.test)
   (:require [cljs.analyzer :as ana]
@@ -102,6 +110,21 @@
 (defmacro capture-warnings [& body]
   `(capture-warnings* (fn [] ~@body)))
 
+(deftest or-doesnt-create-bindings
+  (let [cenv (atom @cenv)]
+    (binding [ana/*cljs-static-fns* true
+              ana/*analyze-deps* false]
+      (env/with-compiler-env cenv
+        (ana/analyze-file (File. "src/main/cljs/cljs/core.cljs"))
+        (let [warnings (-> (capture-warnings
+                             (with-out-str
+                               (comp/emit
+                                 (ana/analyze aenv
+                                   '(let [{:keys [a] :or {b 2}} {:a 1}] [a b]))))))]
+          (is (= (ffirst warnings) :undeclared-var))
+          (is (.startsWith (-> warnings first second)
+                "WARNING: Use of undeclared Var cljs.user/b")))))))
+
 (deftest no-warn-on-emit-invoke-protocol-method
   (let [define-foo #(assoc-in % [::ana/namespaces 'cljs.user :defs 'foo]
                               {:ns 'cljs.user
@@ -131,6 +154,39 @@
         `(cljs.user/foo ~(tags/->JSValue {}))
         `(cljs.user/foo ~(tags/->JSValue []))
         '(cljs.user/foo (make-array 0))))))
+
+;; CLJS-1607
+
+(deftest test-cljs-1607
+  (let [define-Foo #(assoc-in % [::ana/namespaces 'cljs.user :defs 'Foo]
+                      {:ns 'cljs.user
+                       :name 'cljs.user/Foo
+                       :protocol-symbol true
+                       :protocol-info {:methods '{foo [[this]]}}
+                       :protocol 'cljs.user/Foo})
+        define-foo #(assoc-in % [::ana/namespaces 'cljs.user :defs 'foo]
+                      {:ns 'cljs.user
+                       :name 'cljs.user/foo
+                       :fn-var true
+                       :method-params '([x])
+                       :protocol 'cljs.user/Foo})
+        aenv-with-foo (-> aenv define-foo define-Foo)
+        cenv-with-foo (-> @cenv define-foo define-Foo)]
+    (binding [ana/*cljs-static-fns* true]
+      (are [form]
+        (empty?
+         (capture-warnings
+          (env/with-compiler-env (atom cenv-with-foo)
+            (with-out-str
+              (comp/emit
+               (ana/analyze aenv-with-foo form))))))
+        '(specify! []
+           cljs.user/Foo
+           (cljs.user/foo [this]
+             :none)
+           Object
+           (bar [this]
+             (cljs.user/foo this)))))))
 
 ;; CLJS-1225
 

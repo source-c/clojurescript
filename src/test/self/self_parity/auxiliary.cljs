@@ -1,3 +1,11 @@
+;; Copyright (c) Rich Hickey. All rights reserved.
+;; The use and distribution terms for this software are covered by the
+;; Eclipse Public License 1.0 (http://opensource.org/licenses/eclipse-1.0.php)
+;; which can be found in the file epl-v10.html at the root of this distribution.
+;; By using this software in any fashion, you are agreeing to be bound by
+;; the terms of this license.
+;; You must not remove this notice, or any other, from this software.
+
 (ns ^{:doc "This auxiliary namespace is not actually loaded.
   Its mere presence cause it to be compiled and thus causes
   the libs listed here to be dumped into the compiler output
@@ -11,7 +19,6 @@
     goog.Throttle
     goog.Timer
     goog.Uri
-    goog.array.ArrayLike
     goog.color
     goog.color.Hsl
     goog.color.Hsv
@@ -25,7 +32,6 @@
     goog.crypt.Cbc
     goog.crypt.Hash
     goog.crypt.Hmac
-    goog.crypt.JpegEncoder
     goog.crypt.Md5
     goog.crypt.Sha1
     goog.crypt.Sha2
