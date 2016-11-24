@@ -44,7 +44,9 @@
             [clojure.java.io :as io]
             [clojure.set :as set]
             [clojure.string :as string]
-            [clojure.data.json :as json])
+            [clojure.data.json :as json]
+            [clojure.tools.reader :as reader]
+            [clojure.tools.reader.reader-types :as readers])
   (:import [java.io File BufferedInputStream StringWriter]
            [java.net URL]
            [java.util.logging Level]
@@ -57,7 +59,7 @@
               Result JSError CheckLevel DiagnosticGroups
               CommandLineRunner AnonymousFunctionNamingPolicy
               JSModule JSModuleGraph SourceMap ProcessCommonJSModules
-              ES6ModuleLoader AbstractCompiler TransformAMDToCJSModule
+              AbstractCompiler TransformAMDToCJSModule
               ProcessEs6Modules CompilerInput]
            [com.google.javascript.rhino Node]
            [java.nio.file Path Paths Files StandardWatchEventKinds WatchKey
@@ -73,45 +75,6 @@
 
 (defn random-string [length]
   (apply str (take length (repeatedly random-char))))
-
-(util/compile-if
- (.getConstructor ES6ModuleLoader
-   (into-array java.lang.Class
-               [java.util.List java.lang.Iterable]))
- (do (def is-new-es6-loader? true)
-     (def default-module-root ES6ModuleLoader/DEFAULT_FILENAME_PREFIX))
- (def is-new-es6-loader? false))
-
-(util/compile-if
- (.getConstructor ES6ModuleLoader
-   (into-array java.lang.Class
-               [AbstractCompiler java.lang.String]))
- (def is-old-es6-loader? true)
- (def is-old-es6-loader? false))
-
-(util/compile-if
- (and (.getConstructor ProcessCommonJSModules
-        (into-array java.lang.Class
-                    [com.google.javascript.jscomp.Compiler ES6ModuleLoader]))
-      (or is-new-es6-loader? is-old-es6-loader?))
- (def can-convert-commonjs? true)
- (def can-convert-commonjs? false))
-
-(util/compile-if
- (and can-convert-commonjs?
-      (.getConstructor TransformAMDToCJSModule
-        (into-array java.lang.Class
-                    [AbstractCompiler])))
- (def can-convert-amd? true)
- (def can-convert-amd? false))
-
-(util/compile-if
- (and (.getConstructor ProcessEs6Modules
-        (into-array java.lang.Class
-                    [com.google.javascript.jscomp.Compiler ES6ModuleLoader Boolean/TYPE]))
-      (or is-new-es6-loader? is-old-es6-loader?))
- (def can-convert-es6? true)
- (def can-convert-es6? false))
 
 ;; Closure API
 ;; ===========
@@ -168,7 +131,7 @@
     :pretty-print :print-input-delimiter :pseudo-names :recompile-dependents :source-map
     :source-map-inline :source-map-timestamp :static-fns :target :verbose :warnings
     :emit-constants :ups-externs :ups-foreign-libs :ups-libs :warning-handlers :preloads
-    :browser-repl})
+    :browser-repl :cache-analysis-format :infer-externs})
 
 (def string->charset
   {"iso-8859-1" StandardCharsets/ISO_8859_1
@@ -191,6 +154,16 @@
              (string/join ", " (keys string->charset)) " supported ")
         {}))))
 
+(defn ^CompilerOptions$LanguageMode lang-key->lang-mode [key]
+  (case key
+    :no-transpile       CompilerOptions$LanguageMode/NO_TRANSPILE
+    :ecmascript6        CompilerOptions$LanguageMode/ECMASCRIPT6
+    :ecmascript6-strict CompilerOptions$LanguageMode/ECMASCRIPT6_STRICT
+    :ecmascript6-typed  CompilerOptions$LanguageMode/ECMASCRIPT6_TYPED
+    :ecmascript5        CompilerOptions$LanguageMode/ECMASCRIPT5
+    :ecmascript5-strict CompilerOptions$LanguageMode/ECMASCRIPT5_STRICT
+    :ecmascript3        CompilerOptions$LanguageMode/ECMASCRIPT3))
+
 (defn set-options
   "TODO: Add any other options that we would like to support."
   [opts ^CompilerOptions compiler-options]
@@ -209,25 +182,11 @@
           :mapped AnonymousFunctionNamingPolicy/MAPPED
           (throw (IllegalArgumentException. (str "Invalid :anon-fn-naming-policy value " policy " - only :off, :unmapped, :mapped permitted")))))))
 
-  (when (contains? opts :language-in)
-    (case (:language-in opts)
-      :no-transpile       (.setLanguageIn compiler-options CompilerOptions$LanguageMode/NO_TRANSPILE)
-      :ecmascript6        (.setLanguageIn compiler-options CompilerOptions$LanguageMode/ECMASCRIPT6)
-      :ecmascript6-strict (.setLanguageIn compiler-options CompilerOptions$LanguageMode/ECMASCRIPT6_STRICT)
-      :ecmascript6-typed  (.setLanguageIn compiler-options CompilerOptions$LanguageMode/ECMASCRIPT6_TYPED)
-      :ecmascript5        (.setLanguageIn compiler-options CompilerOptions$LanguageMode/ECMASCRIPT5)
-      :ecmascript5-strict (.setLanguageIn compiler-options CompilerOptions$LanguageMode/ECMASCRIPT5_STRICT)
-      :ecmascript3        (.setLanguageIn compiler-options CompilerOptions$LanguageMode/ECMASCRIPT3)))
+  (when-let [lang-key (:language-in opts)]
+    (.setLanguageIn compiler-options (lang-key->lang-mode lang-key)))
 
-  (when (contains? opts :language-out)
-    (case (:language-out opts)
-      :no-transpile       (.setLanguageOut compiler-options CompilerOptions$LanguageMode/NO_TRANSPILE)
-      :ecmascript6        (.setLanguageOut compiler-options CompilerOptions$LanguageMode/ECMASCRIPT6)
-      :ecmascript6-strict (.setLanguageOut compiler-options CompilerOptions$LanguageMode/ECMASCRIPT6_STRICT)
-      :ecmascript6-typed  (.setLanguageOut compiler-options CompilerOptions$LanguageMode/ECMASCRIPT6_TYPED)
-      :ecmascript5        (.setLanguageOut compiler-options CompilerOptions$LanguageMode/ECMASCRIPT5)
-      :ecmascript5-strict (.setLanguageOut compiler-options CompilerOptions$LanguageMode/ECMASCRIPT5_STRICT)
-      :ecmascript3        (.setLanguageOut compiler-options CompilerOptions$LanguageMode/ECMASCRIPT3)))
+  (when-let [lang-key (:language-out opts)]
+    (.setLanguageOut compiler-options (lang-key->lang-mode lang-key)))
 
   (when (contains? opts :print-input-delimiter)
     (set! (.printInputDelimiter compiler-options)
@@ -267,7 +226,7 @@
           :else (println "value for" key "must be string, int, float, or bool"))))
     (if-let [extra-annotations (:closure-extra-annotations opts)]
       (. compiler-options (setExtraAnnotationNames (map name extra-annotations))))
-    (when (contains? opts :source-map)
+    (when (:source-map opts)
       (if (:modules opts)
         ;; name is not actually used by Closur in :modules case,
         ;; but we need to provide _something_ for Closure to not
@@ -294,7 +253,7 @@
   Options may contain an :externs key with a list of file paths to
   load. The :use-only-custom-externs flag may be used to indicate that
   the default externs should be excluded."
-  [{:keys [externs use-only-custom-externs target ups-externs]}]
+  [{:keys [externs use-only-custom-externs target ups-externs infer-externs] :as opts}]
   (let [validate (fn validate [p us]
                    (if (empty? us)
                      (throw (IllegalArgumentException.
@@ -316,12 +275,16 @@
                          ext)))
         load-js (fn [ext]
                   (map #(js-source-file (.getFile %) (slurp %)) ext))]
-    (let [js-sources (-> externs filter-js add-target load-js)
+    (let [js-sources  (-> externs filter-js add-target load-js)
           ups-sources (-> ups-externs filter-cp-js load-js)
-          all-sources (concat js-sources ups-sources)] 
-      (if use-only-custom-externs
-        all-sources
-        (into all-sources (CommandLineRunner/getDefaultExterns))))))
+          all-sources (vec (concat js-sources ups-sources))]
+      (cond->
+        (if use-only-custom-externs
+          all-sources
+          (into all-sources (CommandLineRunner/getDefaultExterns)))
+        infer-externs
+        (conj (js-source-file nil
+                (io/file (util/output-directory opts) "inferred_externs.js")))))))
 
 (defn ^com.google.javascript.jscomp.Compiler make-closure-compiler []
   (let [compiler (com.google.javascript.jscomp.Compiler.)]
@@ -810,17 +773,20 @@
   (loop [ns-info (.pollFirst deque)]
     (when (and ns-info (not @failed))
       (let [{:keys [requires]} ns-info
-            input-set' @input-set]
+            input-set' @input-set
+            {:keys [compiler-stats verbose]} opts]
         (if (every? #(not (contains? input-set' %)) requires)
           (do
             (try
-              (swap! compiled conj
-                (-compile (or (:source-file ns-info)
-                              (:source-forms ns-info))
-                  ; - ns-info -> ns -> cljs file relpath -> js relpath
-                  (merge opts
-                    {:output-file (comp/rename-to-js
-                                    (util/ns->relpath (:ns ns-info)))})))
+              (util/measure (and compiler-stats verbose)
+                (str "Compile " (:ns ns-info))
+                (swap! compiled conj
+                  (-compile (or (:source-file ns-info)
+                                (:source-forms ns-info))
+                                    ; - ns-info -> ns -> cljs file relpath -> js relpath
+                    (merge opts
+                      {:output-file (comp/rename-to-js
+                                      (util/ns->relpath (:ns ns-info)))}))))
               (catch Throwable e
                 (reset! failed e)))
             (when-not @failed
@@ -865,10 +831,12 @@
            (for [ns-info inputs]
              ; TODO: compile-file calls parse-ns unnecessarily to get ns-info
              ; TODO: we could mark dependent namespaces for recompile here
-             (-compile (or (:source-file ns-info)
-                           (:source-forms ns-info))
-               ; - ns-info -> ns -> cljs file relpath -> js relpath
-               (merge opts {:output-file (comp/rename-to-js (util/ns->relpath (:ns ns-info)))})))))))))
+             (util/measure (and compiler-stats (:verbose opts))
+               (str "Compile " (:ns ns-info))
+               (-compile (or (:source-file ns-info)
+                             (:source-forms ns-info))
+                                        ; - ns-info -> ns -> cljs file relpath -> js relpath
+                 (merge opts {:output-file (comp/rename-to-js (util/ns->relpath (:ns ns-info)))}))))))))))
 
 (defn add-goog-base
   [inputs]
@@ -901,27 +869,29 @@
   files needing copying or compilation will be compiled and/or copied to the
   appropiate location."
   [inputs opts]
-  (let [pred     (fn [x]
-                   (if (:emit-constants opts)
-                     (not= ["constants-table"] (:provides x))
-                     (not= ["cljs.core"] (:provides x))))
-        pre      (take-while pred inputs)
-        post     (drop-while pred inputs)
-        preloads (remove nil?
-                   (map
-                     (fn [preload]
-                       (try
-                         (comp/find-source preload)
-                         (catch Throwable t
-                           (util/debug-prn "WARNING: preload namespace" preload "does not exist"))))
-                     (:preloads opts)))]
-    (distinct-by :provides
-      (concat pre [(first post)]
-        (-> (add-dependency-sources preloads opts)
-          deps/dependency-order
-          (compile-sources opts)
-          (add-js-sources opts))
-        (next post)))))
+  (if-not (:preloads opts)
+    inputs
+    (let [pred     (fn [x]
+                     (if (:emit-constants opts)
+                       (not= ["constants-table"] (:provides x))
+                       (not= ["cljs.core"] (:provides x))))
+          pre      (take-while pred inputs)
+          post     (drop-while pred inputs)
+          preloads (remove nil?
+                     (map
+                       (fn [preload]
+                         (try
+                           (comp/find-source preload)
+                           (catch Throwable t
+                             (util/debug-prn "WARNING: preload namespace" preload "does not exist"))))
+                       (:preloads opts)))]
+      (distinct-by :provides
+        (concat pre [(first post)]
+          (-> (add-dependency-sources preloads opts)
+            deps/dependency-order
+            (compile-sources opts)
+            (add-js-sources opts))
+          (next post))))))
 
 (comment
   (comp/find-sources-root "samples/hello/src")
@@ -1512,45 +1482,17 @@
 
        :else (str (random-string 5) ".js")))))
 
-(defn get-js-module-root [js-file]
-  (let [path (.getParent (io/file js-file))]
-    (cond->> path
-      (.startsWith path File/separator) (str ".")
-      (not (.startsWith path (str "." File/separator))) (str "." File/separator)
-      (not (.endsWith path File/separator)) (#(str % File/separator)))))
+(defn get-source-files [js-modules]
+  (map (fn [lib]
+         (js-source-file (:file lib) (deps/-source lib)))
+       js-modules))
 
-(util/compile-if is-new-es6-loader?
-  (defn make-es6-loader [source-files]
-    (let [^List module-roots (list default-module-root)
-          ^List compiler-inputs (map #(CompilerInput. %) source-files)]
-      (ES6ModuleLoader. module-roots compiler-inputs)))
-  (defn make-es6-loader [closure-compiler file]
-    (let [module-root (get-js-module-root file)]
-      (ES6ModuleLoader. closure-compiler module-root))))
-
-(defn ^Node get-root-node [ijs closure-compiler]
-  (let [^CompilerInput input (->> (deps/-source ijs)
-                                  (js-source-file (:file ijs))
-                                  (CompilerInput.))]
-    (.getAstRoot input closure-compiler)))
-
-(defn get-source-files [opts]
-  (->> (concat (:foreign-libs opts)
-               (:ups-foreign-libs opts))
-       (filter #(let [module-type (:module-type %)]
-                  (or (= module-type :amd)
-                      (= module-type :commonjs)
-                      (= module-type :es6))))
-       (map (fn [lib]
-              (let [lib (deps/load-foreign-library lib)]
-                (js-source-file (:file lib) (deps/-source lib)))))))
-
-(defmulti convert-js-module
-  "Takes a JavaScript module as an IJavaScript and rewrites it into a Google
-  Closure-compatible form. Returns an IJavaScript with the converted module
+(defmulti convert-js-modules
+  "Takes a list JavaScript modules as an IJavaScript and rewrites them into a Google
+  Closure-compatible form. Returns list IJavaScript with the converted module
   code set as source."
-  (fn [{module-type :module-type :as ijs} opts]
-    (if (and (= module-type :amd) can-convert-amd?)
+  (fn [module-type js-modules opts]
+    (if (= module-type :amd)
       ;; AMD modules are converted via CommonJS modules
       :commonjs
       module-type)))
@@ -1562,48 +1504,45 @@
        :language-in :language-out])
     (set-options (CompilerOptions.))))
 
-(util/compile-if can-convert-commonjs?
-  (defmethod convert-js-module :commonjs [ijs opts]
-    (let [{:keys [file module-type]} ijs
-          ^List externs '()
-          ^List source-files (get-source-files opts)
-          ^CompilerOptions options (make-convert-js-module-options opts)
-          closure-compiler (doto (make-closure-compiler)
-                             (.init externs source-files options))
-          es6-loader (if is-new-es6-loader?
-                       (make-es6-loader source-files)
-                       (make-es6-loader closure-compiler file))
-          cjs (ProcessCommonJSModules. closure-compiler es6-loader)
-          ^Node root (get-root-node ijs closure-compiler)]
-      (util/compile-if can-convert-amd?
-        (when (= module-type :amd)
-          (.process (TransformAMDToCJSModule. closure-compiler) nil root)))
-      (.process cjs nil root)
-      (report-failure (.getResult closure-compiler))
-      (assoc ijs :source (.toSource closure-compiler root)))))
+(defn get-js-root [closure-compiler]
+  (.getSecondChild (.getRoot closure-compiler)))
 
-(util/compile-if can-convert-es6?
-  (defmethod convert-js-module :es6 [ijs opts]
-    (let [{:keys [file]} ijs
-          ^List externs '()
-          ^List source-files (get-source-files opts)
-          ^CompilerOptions options (doto (make-convert-js-module-options opts)
-                                     (.setLanguageIn CompilerOptions$LanguageMode/ECMASCRIPT6)
-                                     (.setLanguageOut CompilerOptions$LanguageMode/ECMASCRIPT5))
-          closure-compiler (doto (make-closure-compiler)
-                             (.init externs source-files options))
-          es6-loader (if is-new-es6-loader?
-                       (make-es6-loader source-files)
-                       (make-es6-loader closure-compiler file))
-          cjs (ProcessEs6Modules. closure-compiler es6-loader true)
-          ^Node root (get-root-node ijs closure-compiler)]
-      (.processFile cjs root)
-      (report-failure (.getResult closure-compiler))
-      (assoc ijs :source (.toSource closure-compiler root)))))
+(defn get-closure-sources
+  "Gets map of source file name -> Node, for files in Closure Compiler js root."
+  [closure-compiler]
+  (let [source-nodes (.children (get-js-root closure-compiler))]
+    (into {} (map (juxt #(.getSourceFileName ^Node %) identity) source-nodes))))
 
-(defmethod convert-js-module :default [ijs opts]
-  (ana/warning :unsupported-js-module-type @env/*compiler* ijs)
-  ijs)
+(defn add-converted-source [closure-compiler result-nodes {:keys [file] :as ijs}]
+  (assoc ijs :source (.toSource closure-compiler ^Node (get result-nodes file))))
+
+(defmethod convert-js-modules :commonjs [module-type js-modules opts]
+  (let [^List externs '()
+        ^List source-files (get-source-files js-modules)
+        ^CompilerOptions options (doto (make-convert-js-module-options opts)
+                                   (.setProcessCommonJSModules true)
+                                   (.setTransformAMDToCJSModules (= module-type :amd)))
+        closure-compiler (doto (make-closure-compiler)
+                           (.init externs source-files options))]
+    (.parse closure-compiler)
+    (report-failure (.getResult closure-compiler))
+    (map (partial add-converted-source closure-compiler (get-closure-sources closure-compiler)) js-modules)))
+
+(defmethod convert-js-modules :es6 [module-type js-modules opts]
+  (let [^List externs '()
+        ^List source-files (get-source-files js-modules)
+        ^CompilerOptions options (doto (make-convert-js-module-options opts)
+                                   (.setLanguageIn CompilerOptions$LanguageMode/ECMASCRIPT6)
+                                   (.setLanguageOut (lang-key->lang-mode (:language-out opts :ecmascript3))))
+        closure-compiler (doto (make-closure-compiler)
+                           (.init externs source-files options))]
+    (.parse closure-compiler)
+    (report-failure (.getResult closure-compiler))
+    (map (partial add-converted-source closure-compiler (get-closure-sources closure-compiler)) js-modules)))
+
+(defmethod convert-js-modules :default [module-type js-modules opts]
+  (ana/warning :unsupported-js-module-type @env/*compiler* (first js-modules))
+  js-modules)
 
 (defmulti js-transforms
   "Takes an IJavaScript with the source code set as source, transforms the
@@ -1634,12 +1573,7 @@
       (when (and res (or ana/*verbose* (:verbose opts)))
         (util/debug-prn "Copying" (str res) "to" (str out-file)))
       (util/mkdirs out-file)
-      (spit out-file
-        (cond-> js
-          (map? js) (assoc :source (deps/-source js))
-          (:preprocess js) (js-transforms opts)
-          (:module-type js) (convert-js-module opts)
-          true deps/-source))
+      (spit out-file (deps/-source js))
       (when res
         (.setLastModified ^File out-file (util/last-modified res))))
     (if (map? js)
@@ -1854,6 +1788,18 @@
   (assert (not (and (= target :nodejs) (= optimizations :whitespace)))
     (format ":nodejs target not compatible with :whitespace optimizations")))
 
+(defn check-preloads [{:keys [preloads optimizations] :as opts}]
+  (when (and (some? preloads) (not= optimizations :none))
+    (binding [*out* *err*]
+      (println "WARNING: :preloads should only be specified with :none optimizations"))))
+
+(defn check-cache-analysis-format [{:keys [cache-analysis cache-analysis-format] :as opts}]
+  (assert (not (and cache-analysis
+                    ((complement #{:edn :transit}) cache-analysis-format)
+                    (not (nil? cache-analysis-format))))
+    (format ":cache-analysis format must be :edn or :transit but it is: %s"
+      (pr-str cache-analysis-format))))
+
 (defn foreign-source? [js]
   (and (satisfies? deps/IJavaScript js)
        (deps/-foreign? js)))
@@ -1884,7 +1830,8 @@
           :ups-libs libs
           :ups-foreign-libs foreign-libs
           :ups-externs externs
-          :emit-constants emit-constants)
+          :emit-constants emit-constants
+          :cache-analysis-format (:cache-analysis-format opts :transit))
         (update-in [:preamble] #(into (or % []) ["cljs/imul.js"])))
 
       (:target opts)
@@ -1901,34 +1848,89 @@
         (not (false? (:static-fns opts))) (assoc :static-fns true)
         (not (false? (:optimize-constants opts))) (assoc :optimize-constants true)))))
 
-(defn- process-js-modules*
-  [opts k]
-  (let [js-modules (filter :module-type (k opts))]
-    (reduce (fn [new-opts {:keys [file module-type] :as lib}]
-              (if (or (and (= module-type :commonjs) can-convert-commonjs?)
-                      (and (= module-type :amd) can-convert-amd?)
-                      (and (= module-type :es6) can-convert-es6?))
-                (let [ijs (write-javascript opts (deps/load-foreign-library lib))
-                      module-name (-> (deps/load-library (:out-file ijs)) first :provides first)]
-                  (doseq [provide (:provides ijs)]
-                    (swap! env/*compiler*
-                      #(update-in % [:js-module-index] assoc provide module-name)))
-                  (-> new-opts
-                      (update-in [:libs] (comp vec conj) (:out-file ijs))
-                      (update-in [k]
-                        (comp vec (fn [libs] (remove #(= (:file %) file) libs))))))
-                new-opts))
-            opts js-modules)))
-
 (defn process-js-modules
   "Given the current compiler options, converts JavaScript modules to Google
   Closure modules and writes them to disk. Adds mapping from original module
   namespace to new module namespace to compiler env. Returns modified compiler
   options where new modules are passed with :libs option."
   [opts]
-  (-> opts
-      (process-js-modules* :foreign-libs)
-      (process-js-modules* :ups-foreign-libs)))
+  (let [;; Modules from both :foreign-libs (compiler options) and :ups-foreign-libs (deps.cljs)
+        ;; are processed together, so that files from both sources can depend on each other.
+        ;; e.g. commonjs module in :foreign-libs can depend on commonjs module from :ups-foreign-libs.
+        js-modules (filter :module-type (concat (:foreign-libs opts) (:ups-foreign-libs opts)))]
+    (if (seq js-modules)
+      (util/measure (:compiler-stats opts)
+        "Process JS modules"
+        (let [;; Load all modules - add :source so preprocessing and conversion can access it
+              js-modules (map (fn [lib]
+                                (let [js (deps/load-foreign-library lib)]
+                                  (assoc js :source (deps/-source js))))
+                              js-modules)
+              js-modules (map (fn [js]
+                                (if (:preprocess js)
+                                  (js-transforms js opts)
+                                  js))
+                              js-modules)
+              ;; Conversion is done per module-type, because Compiler needs to process e.g. all CommonJS
+              ;; modules on one go, so it can handle the dependencies between modules.
+              ;; Amdjs modules are converted separate from CommonJS modules so they can't
+              ;; depend on each other.
+              modules-per-type (group-by :module-type js-modules)
+              js-modules (mapcat (fn [[module-type js-modules]]
+                                   (convert-js-modules module-type js-modules opts))
+                                 modules-per-type)]
+
+          ;; Write modules to disk, update compiler state and build new options
+          (reduce (fn [new-opts {:keys [file] :as ijs}]
+                    (let [ijs (write-javascript opts ijs)
+                          module-name (-> (deps/load-library (:out-file ijs)) first :provides first)]
+                      (doseq [provide (:provides ijs)]
+                        (swap! env/*compiler*
+                               #(update-in % [:js-module-index] assoc provide module-name)))
+                      (-> new-opts
+                          (update-in [:libs] (comp vec conj) (:out-file ijs))
+                          ;; js-module might be defined in either, so update both
+                          (update-in [:foreign-libs] (comp vec (fn [libs] (remove #(= (:file %) file) libs))))
+                          (update-in [:ups-foreign-libs] (comp vec (fn [libs] (remove #(= (:file %) file) libs)))))))
+                  opts js-modules)))
+      opts)))
+
+(defn- load-data-reader-file [mappings ^java.net.URL url]
+  (with-open [rdr (readers/input-stream-push-back-reader (.openStream url))]
+    (binding [*file* (.getFile url)]
+      (let [new-mappings (reader/read {:eof nil :read-cond :allow} rdr)]
+        (when (not (map? new-mappings))
+          (throw (ex-info (str "Not a valid data-reader map")
+                   {:url url})))
+        (reduce
+          (fn [m [k v]]
+            (when (not (symbol? k))
+              (throw (ex-info (str "Invalid form in data-reader file")
+                       {:url url
+                        :form k})))
+            (when (and (contains? mappings k)
+                    (not= (mappings k) v))
+              (throw (ex-info "Conflicting data-reader mapping"
+                       {:url url
+                        :conflict k
+                        :mappings m})))
+            (assoc m k v))
+          mappings
+          new-mappings)))))
+
+(defn get-data-readers*
+  "returns a merged map containing all data readers defined by libraries
+   on the classpath."
+  ([]
+   (get-data-readers* (. (Thread/currentThread) (getContextClassLoader))))
+  ([classloader]
+   (let [data-reader-urls (enumeration-seq (. classloader (getResources "data_readers.cljc")))]
+     (reduce load-data-reader-file {} data-reader-urls))))
+
+(def get-data-readers (memoize get-data-readers*))
+
+(defn load-data-readers! [compiler]
+  (swap! compiler update-in [:cljs.analyzer/data-readers] merge (get-data-readers)))
 
 (defn build
   "Given a source which can be compiled, produce runnable JavaScript."
@@ -1949,6 +1951,8 @@
          (check-source-map-path opts)
          (check-output-wrapper opts)
          (check-node-target opts)
+         (check-preloads opts)
+         (check-cache-analysis-format opts)
          (swap! compiler-env
            #(-> %
              (update-in [:options] merge all-opts)
@@ -1988,6 +1992,7 @@
                  compile-opts (if one-file?
                                 (assoc all-opts :output-file (:output-to all-opts))
                                 all-opts)
+                 _ (load-data-readers! compiler-env)
                  js-sources (-> (-find-sources source all-opts)
                                 (add-dependency-sources compile-opts)
                                 deps/dependency-order
@@ -2003,6 +2008,12 @@
                      (comp/emit-constants-table-to-file
                        (::ana/constant-table @env/*compiler*)
                        (str (util/output-directory all-opts) "/constants_table.js")))
+                 _ (when (:infer-externs all-opts)
+                     (comp/emit-inferred-externs-to-file
+                       (reduce util/map-merge {}
+                         (map (comp :externs second)
+                           (get @compiler-env ::ana/namespaces)))
+                       (str (util/output-directory all-opts) "/inferred_externs.js")))
                  optim (:optimizations all-opts)
                  ret (if (and optim (not= optim :none))
                        (do
@@ -2050,6 +2061,11 @@
      {:hello
       {:output-to "samples/hello/out/hello.js"
        :entries '#{cljs.reader hello.core}}}})
+
+  (require '[cljs.externs :as externs])
+
+  (externs/parse-externs
+    (js-source-file "cljs/externs.js" (io/file "src/main/cljs/cljs/externs.js")))
   )
 
 (defn ^File target-file-for-cljs-ns

@@ -342,8 +342,8 @@
 
 (defn- load-deps
   ([bound-vars ana-env lib deps cb]
-   (analyze-deps bound-vars ana-env lib deps nil cb))
-  ([bound-vars ana-env lib deps opts cb]
+   (load-deps bound-vars ana-env lib deps nil nil cb))
+  ([bound-vars ana-env lib deps reload opts cb]
    (when (:verbose opts)
      (debug-prn "Loading dependencies for" lib))
    (binding [ana/*cljs-dep-set* (vary-meta (conj (:*cljs-dep-set* bound-vars) lib)
@@ -356,12 +356,12 @@
              opts' (-> opts
                      (dissoc :context)
                      (dissoc :ns))]
-         (require bound-vars dep opts'
+         (require bound-vars dep reload opts'
            (fn [res]
              (when (:verbose opts)
                (debug-prn "Loading result: " res))
              (if-not (:error res)
-               (load-deps bound-vars ana-env lib (next deps) opts cb)
+               (load-deps bound-vars ana-env lib (next deps) nil opts cb)
                (if-let [cljs-dep (let [cljs-ns (ana/clj-ns->cljs-ns dep)]
                                    (get {dep nil} cljs-ns cljs-ns))]
                  (require bound-vars cljs-dep opts'
@@ -370,7 +370,7 @@
                        (cb res)
                        (do
                          (patch-alias-map (:*compiler* bound-vars) lib dep cljs-dep)
-                         (load-deps bound-vars ana-env lib (next deps) opts
+                         (load-deps bound-vars ana-env lib (next deps) nil opts
                            (fn [res]
                              (if (:error res)
                                (cb res)
@@ -513,8 +513,9 @@
                                  (str "Could not parse ns form " (:name ast)) cause)))))))))]
        (cond
          (and load (seq (:deps ast)))
-         (load-deps bound-vars ana-env (:name ast) (:deps ast) (dissoc opts :macros-ns)
-           #(check-uses-and-load-macros % (rewrite-ns-ast ast (:aliased-loads %))))
+         (let [{:keys [reload name deps]} ast]
+           (load-deps bound-vars ana-env name deps (or (:require reload) (:use reload)) (dissoc opts :macros-ns)
+             #(check-uses-and-load-macros % (rewrite-ns-ast ast (:aliased-loads %)))))
 
          (and (not load) (:*analyze-deps* bound-vars) (seq (:deps ast)))
          (analyze-deps bound-vars ana-env (:name ast) (:deps ast) (dissoc opts :macros-ns)
@@ -589,8 +590,21 @@
    opts (map)
      compilation options.
 
-   :eval - the eval function to invoke, see *eval-fn*
-   :load - library resolution function, see *load-fn*
+      :eval          - eval function to invoke, see *eval-fn*
+      :load          - library resolution function, see *load-fn*
+      :source-map    - set to true to generate inline source map information
+      :def-emits-var - sets whether def (and derived) forms return either a Var
+                       (if set to true) or the def init value (if false). Default
+                       is false.
+      :static-fns    - employ static dispatch to specific function arities in
+                       emitted JavaScript, as opposed to making use of the
+                       `call` construct. Default is false.
+      :ns            - optional, the namespace in which to evaluate the source.
+      :verbose       - optional, emit details from compiler activity. Defaults to
+                       false.
+      :context       - optional, sets the context for the source. Possible values
+                       are `:expr`, `:statement` and `:return`. Defaults to
+                       `:expr`.
 
    cb (function)
      callback, will be invoked with a map. If successful the map will contain
@@ -665,8 +679,21 @@
    opts (map)
      compilation options.
 
-     :eval - the eval function to invoke, see *eval-fn*
-     :load - library resolution function, see *load-fn*
+      :eval          - eval function to invoke, see *eval-fn*
+      :load          - library resolution function, see *load-fn*
+      :source-map    - set to true to generate inline source map information
+      :def-emits-var - sets whether def (and derived) forms return either a Var
+                       (if set to true) or the def init value (if false). Default
+                       is false.
+      :static-fns    - employ static dispatch to specific function arities in
+                       emitted JavaScript, as opposed to making use of the
+                       `call` construct. Default is false.
+      :ns            - optional, the namespace in which to evaluate the source.
+      :verbose       - optional, emit details from compiler activity. Defaults to
+                       false.
+      :context       - optional, sets the context for the source. Possible values
+                       are `:expr`, `:statement` and `:return`. Defaults to
+                       `:expr`.
 
    cb (function)
      callback, will be invoked with a map. If successful the map will contain
@@ -757,8 +784,21 @@
    opts (map)
      compilation options.
 
-     :load       - library resolution function, see *load-fn*
-     :source-map - set to true to generate inline source map information
+      :eval          - eval function to invoke, see *eval-fn*
+      :load          - library resolution function, see *load-fn*
+      :source-map    - set to true to generate inline source map information
+      :def-emits-var - sets whether def (and derived) forms return either a Var
+                       (if set to true) or the def init value (if false). Default
+                       is false.
+      :static-fns    - employ static dispatch to specific function arities in
+                       emitted JavaScript, as opposed to making use of the
+                       `call` construct. Default is false.
+      :ns            - optional, the namespace in which to evaluate the source.
+      :verbose       - optional, emit details from compiler activity. Defaults to
+                       false.
+      :context       - optional, sets the context for the source. Possible values
+                       are `:expr`, `:statement` and `:return`. Defaults to
+                       `:expr`.
 
    cb (function)
      callback, will be invoked with a map. If successful the map will contain
@@ -882,15 +922,27 @@
   opts (map)
     compilation options.
 
-    :eval         - eval function to invoke, see *eval-fn*
-    :load         - library resolution function, see *load-fn*
-    :source-map   - set to true to generate inline source map information
-    :cache-source - optional, a function to run side-effects with the
-                    compilation result prior to actual evalution. This function
-                    takes two arguments, the first is the eval map, the source
-                    will be under :source. The second argument is a callback of
-                    one argument. If an error occurs an :error key should be
-                    supplied.
+    :eval          - eval function to invoke, see *eval-fn*
+    :load          - library resolution function, see *load-fn*
+    :source-map    - set to true to generate inline source map information
+    :cache-source  - optional, a function to run side-effects with the
+                     compilation result prior to actual evalution. This function
+                     takes two arguments, the first is the eval map, the source
+                     will be under :source. The second argument is a callback of
+                     one argument. If an error occurs an :error key should be
+                     supplied.
+    :def-emits-var - sets whether def (and derived) forms return either a Var
+                     (if set to true) or the def init value (if false). Default
+                     is false.
+    :static-fns    - employ static dispatch to specific function arities in
+                     emitted JavaScript, as opposed to making use of the
+                     `call` construct. Default is false.
+    :ns            - optional, the namespace in which to evaluate the source.
+    :verbose       - optional, emit details from compiler activity. Defaults to
+                     false.
+    :context       - optional, sets the context for the source. Possible values
+                     are `:expr`, `:statement` and `:return`. Defaults to
+                      `:expr`.
 
   cb (function)
     callback, will be invoked with a map. If succesful the map will contain

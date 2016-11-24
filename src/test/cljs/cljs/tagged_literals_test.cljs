@@ -6,16 +6,15 @@
 ;; the terms of this license.
 ;; You must not remove this notice, or any other, from this software.
 
-(ns cljs.macro-test
-  (:refer-clojure :exclude [==])
-  (:require [cljs.test :refer-macros [deftest is]])
-  (:use-macros [cljs.macro-test.macros :only [==]]))
+(ns cljs.tagged-literals-test
+  (:require [cljs.test :refer-macros [deftest is]]
+            [cljs.reader :as reader]))
 
-(deftest test-macros
-  (is (= (== 1 1) 2)))
+(deftest test-identity-custom-literal
+  (is (= #cljs/tag [1 2 3] [1 2 3])))
 
-(deftest macroexpansion
-  (is (= 1 (macroexpand-1 '1)))
-  (is (= '(if true (do 1)) (macroexpand-1 '(when true 1))))
-  (is (= 1 (macroexpand '1)))
-  (is (= '(if true (do 1)) (macroexpand '(when true 1)))))
+(deftest test-runtime-reader
+  (is (object? (reader/read-string "#js {}")))
+  (is (= {} (reader/read-string "#cljs/tag {}")))
+  (is (= (reader/read-string "#cljs/inc 0") 1))
+  (is (= (reader/read-string "#cljs/union #{1}") #{1})))

@@ -204,6 +204,14 @@
    :cljs
    (defmulti emit-constant type))
 
+(defmethod emit-constant :default
+  [x]
+  (throw
+    (ex-info (str "failed compiling constant: " x "; "
+               (type x) " is not a valid ClojureScript constant.")
+      {:constant x
+       :type (type x)})))
+
 (defmethod emit-constant nil [x] (emits "null"))
 
 #?(:clj
@@ -1373,8 +1381,9 @@
       (compile-file src dest nil))
      ([src dest opts]
       {:post [map?]}
-      (binding [ana/*file-defs*    (atom #{})
-                ana/*unchecked-if* false]
+      (binding [ana/*file-defs*     (atom #{})
+                ana/*unchecked-if*  false
+                ana/*cljs-warnings* ana/*cljs-warnings*]
         (let [nses      (get @env/*compiler* ::ana/namespaces)
               src-file  (io/file src)
               dest-file (io/file dest)
@@ -1483,3 +1492,29 @@
      (with-open [out ^java.io.Writer (io/make-writer dest {})]
        (binding [*out* out]
          (emit-constants-table table)))))
+
+(defn emit-externs
+  ([externs]
+   (emit-externs [] externs (atom #{})))
+  ([prefix externs top-level]
+   (loop [ks (seq (keys externs))]
+     (when ks
+       (let [k (first ks)
+             [top :as prefix'] (conj prefix k)]
+         (when-not (= 'prototype k)
+           (if-not (contains? @top-level top)
+             (do
+               (emitln "var " (string/join "." (map munge prefix')) ";")
+               (swap! top-level conj top))
+             (emitln (string/join "." (map munge prefix')) ";")))
+         (let [m (get externs k)]
+           (when-not (empty? m)
+             (emit-externs prefix' m top-level))))
+       (recur (next ks))))))
+
+#?(:clj
+   (defn emit-inferred-externs-to-file [externs dest]
+     (io/make-parents dest)
+     (with-open [out ^java.io.Writer (io/make-writer dest {})]
+       (binding [*out* out]
+         (emit-externs externs)))))

@@ -6,16 +6,6 @@
 ;; the terms of this license.
 ;; You must not remove this notice, or any other, from this software.
 
-(ns cljs.macro-test
-  (:refer-clojure :exclude [==])
-  (:require [cljs.test :refer-macros [deftest is]])
-  (:use-macros [cljs.macro-test.macros :only [==]]))
-
-(deftest test-macros
-  (is (= (== 1 1) 2)))
-
-(deftest macroexpansion
-  (is (= 1 (macroexpand-1 '1)))
-  (is (= '(if true (do 1)) (macroexpand-1 '(when true 1))))
-  (is (= 1 (macroexpand '1)))
-  (is (= '(if true (do 1)) (macroexpand '(when true 1)))))
+{cljs/tag clojure.core/identity
+ cljs/inc clojure.core/inc
+ cljs/union clojure.set/union}

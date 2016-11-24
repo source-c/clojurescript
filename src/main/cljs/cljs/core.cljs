@@ -18,6 +18,9 @@
 (def *clojurescript-version*)
 
 (def *unchecked-if* false)
+(def *warn-on-infer* false)
+
+(defonce PROTOCOL_SENTINEL #js {})
 
 (goog-define
   ^{:dynamic true
@@ -227,9 +230,9 @@
   (goog/isString x))
 
 (defn ^boolean char?
-  "Returns true if x is a JavaScript char."
+  "Returns true if x is a JavaScript string of length one."
   [x]
-  (gstring/isUnicodeChar x))
+  (and (string? x) (== 1 (.-length x))))
 
 (defn ^boolean any?
   "Returns true if given any argument."
@@ -902,9 +905,12 @@
         -1048576
         2146959360))
 
-    (true? o) 1
+    ;; note: mirrors Clojure's behavior on the JVM, where the hashCode is
+    ;; 1231 for true and 1237 for false
+    ;; http://docs.oracle.com/javase/7/docs/api/java/lang/Boolean.html#hashCode%28%29
+    (true? o) 1231
 
-    (false? o) 0
+    (false? o) 1237
 
     (string? o)
     (m3-hash-int (hash-string o))
@@ -4759,6 +4765,8 @@ reduces them without incurring seq initialization"
 (defn into
   "Returns a new coll consisting of to-coll with all of the items of
   from-coll conjoined. A transducer may be supplied."
+  ([] [])
+  ([to] to)
   ([to from]
      (if-not (nil? to)
        (if (implements? IEditableCollection to)
@@ -5419,7 +5427,9 @@ reduces them without incurring seq initialization"
   IVector
   (-assoc-n [coll n val]
     (let [v-pos (+ start n)]
-      (build-subvec meta (assoc v v-pos val) start (max end (inc v-pos)) nil)))
+      (if (or (neg? n) (<= (inc end) v-pos))
+        (throw (js/Error. (str "Index " n " out of bounds [0," (-count coll) "]")))
+        (build-subvec meta (assoc v v-pos val) start (max end (inc v-pos)) nil))))
 
   IReduce
   (-reduce [coll f]
@@ -5441,7 +5451,11 @@ reduces them without incurring seq initialization"
   (-invoke [coll k]
     (-nth coll k))
   (-invoke [coll k not-found]
-    (-nth coll k not-found)))
+    (-nth coll k not-found))
+
+  IIterable
+  (-iterator [coll]
+    (ranged-iterator v start end)))
 
 (es6-iterable Subvec)
 
@@ -6888,7 +6902,7 @@ reduces them without incurring seq initialization"
             (aset new-arr (inc len) val)
             (set! (.-val added-leaf?) true)
             (HashCollisionNode. nil collision-hash (inc cnt) new-arr))
-          (if (= (aget arr idx) val)
+          (if (= (aget arr (inc idx)) val)
             inode
             (HashCollisionNode. nil collision-hash cnt (clone-and-set arr (inc idx) val)))))
       (.inode-assoc (BitmapIndexedNode. nil (bitpos collision-hash shift) (array nil inode))
@@ -8917,7 +8931,7 @@ reduces them without incurring seq initialization"
   "Returns a lazy seq of nums from start (inclusive) to end
    (exclusive), by step, where start defaults to 0, step to 1,
    and end to infinity."
-  ([] (range 0 (.-MAX-VALUE js/Number) 1))
+  ([] (range 0 (.-MAX_VALUE js/Number) 1))
   ([end] (range 0 end 1))
   ([start end] (range start end 1))
   ([start end step] (Range. nil start end step nil)))
@@ -9617,12 +9631,36 @@ reduces them without incurring seq initialization"
   collection, into the reduction."
   {:added "1.7"}
   [rf]
-  (let [rf1 (preserving-reduced rf)]  
+  (let [rf1 (preserving-reduced rf)]
     (fn
       ([] (rf))
       ([result] (rf result))
       ([result input]
          (reduce rf1 result input)))))
+
+(defn halt-when
+  "Returns a transducer that ends transduction when pred returns true
+  for an input. When retf is supplied it must be a fn of 2 arguments -
+  it will be passed the (completed) result so far and the input that
+  triggered the predicate, and its return value (if it does not throw
+  an exception) will be the return value of the transducer. If retf
+  is not supplied, the input that triggered the predicate will be
+  returned. If the predicate never returns true the transduction is
+  unaffected."
+  {:added "1.9"}
+  ([pred] (halt-when pred nil))
+  ([pred retf]
+     (fn [rf]
+       (fn
+         ([] (rf))
+         ([result]
+            (if (and (map? result) (contains? result ::halt))
+              (::halt result)
+              (rf result)))
+         ([result input]
+            (if (pred input)
+              (reduced {::halt (if retf (retf (rf result) input) input)})
+              (rf result input)))))))
 
 (defn dedupe
   "Returns a lazy sequence removing consecutive duplicates in coll.

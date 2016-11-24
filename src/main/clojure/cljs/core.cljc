@@ -37,6 +37,7 @@
                             require use refer-clojure
 
                             if-some when-some test ns-interns ns-unmap var vswap! macroexpand-1 macroexpand
+                            some?
                             #?@(:cljs [alias coercive-not coercive-not= coercive-= coercive-boolean
                                        truth_ js-arguments js-delete js-in js-debugger exists? divide js-mod
                                        unsafe-bit-and bit-shift-right-zero-fill mask bitpos caching-hash
@@ -857,6 +858,9 @@
 (core/defmacro nil? [x]
   `(coercive-= ~x nil))
 
+(core/defmacro some? [x]
+  `(not (nil? ~x)))
+
 ;; internal - do not use.
 (core/defmacro coercive-not [x]
   (bool-expr (core/list 'js* "(!~{})" x)))
@@ -1397,9 +1401,10 @@
        ~@body)))
 
 (core/defn- adapt-proto-params [type [[this & args :as sig] & body]]
-  `(~(vec (cons (vary-meta this assoc :tag type) args))
-     (this-as ~this
-       ~@body)))
+  (core/let [this' (vary-meta this assoc :tag type)]
+    `(~(vec (cons this' args))
+      (this-as ~this'
+        ~@body))))
 
 (core/defn- add-obj-methods [type type-sym sigs]
   (map (core/fn [[f & meths :as form]]
@@ -1454,7 +1459,7 @@
       (add-obj-methods type type-sym sigs)
       (concat
         (core/when-not (skip-flag psym)
-          [`(set! ~(extend-prefix type-sym pprefix) true)])
+          [`(set! ~(extend-prefix type-sym pprefix) cljs.core/PROTOCOL_SENTINEL)])
         (mapcat
           (core/fn [sig]
             (if (= psym 'cljs.core/IFn)
@@ -1945,7 +1950,7 @@
                                            (mapv (core/fn [arg]
                                                    (core/cond
                                                      (core/symbol? arg) arg
-                                                     (core/and (map? arg) (some? (:as arg))) (:as arg)
+                                                     (core/and (map? arg) (core/some? (:as arg))) (:as arg)
                                                      :else (gensym))) sig)
                                            sig)]
                             `(~sig
@@ -2014,13 +2019,13 @@
       `(let [~xsym ~x]
          (if ~xsym
            (if (or ~(if bit `(unsafe-bit-and (. ~xsym ~msym) ~bit) false)
-                   ~(bool-expr `(. ~xsym ~(symbol (core/str "-" prefix)))))
+                    (identical? cljs.core/PROTOCOL_SENTINEL (. ~xsym ~(symbol (core/str "-" prefix)))))
              true
              false)
            false))
       `(if-not (nil? ~x)
          (if (or ~(if bit `(unsafe-bit-and (. ~x ~msym) ~bit) false)
-                 ~(bool-expr `(. ~x ~(symbol (core/str "-" prefix)))))
+                  (identical? cljs.core/PROTOCOL_SENTINEL (. ~x ~(symbol (core/str "-" prefix)))))
            true
            false)
          false))))
@@ -2040,7 +2045,7 @@
       `(let [~xsym ~x]
          (if-not (nil? ~xsym)
            (if (or ~(if bit `(unsafe-bit-and (. ~xsym ~msym) ~bit) false)
-                   ~(bool-expr `(. ~xsym ~(symbol (core/str "-" prefix)))))
+                    (identical? cljs.core/PROTOCOL_SENTINEL (. ~xsym ~(symbol (core/str "-" prefix)))))
              true
              (if (coercive-not (. ~xsym ~msym))
                (cljs.core/native-satisfies? ~psym ~xsym)
@@ -2048,7 +2053,7 @@
            (cljs.core/native-satisfies? ~psym ~xsym)))
       `(if-not (nil? ~x)
          (if (or ~(if bit `(unsafe-bit-and (. ~x ~msym) ~bit) false)
-                 ~(bool-expr `(. ~x ~(symbol (core/str "-" prefix)))))
+                  (identical? cljs.core/PROTOCOL_SENTINEL (. ~x ~(symbol (core/str "-" prefix)))))
            true
            (if (coercive-not (. ~x ~msym))
              (cljs.core/native-satisfies? ~psym ~x)
@@ -2729,28 +2734,104 @@
   `(do ~@forms))
 
 (core/defmacro require
-  [& specs]
-  `(~'ns* ~(cons :require specs)))
+  "Loads libs, skipping any that are already loaded. Each argument is
+  either a libspec that identifies a lib or a flag that modifies how all the identified
+  libs are loaded. Use :require in the ns macro in preference to calling this
+  directly.
+
+  Libs
+
+  A 'lib' is a named set of resources in classpath whose contents define a
+  library of ClojureScript code. Lib names are symbols and each lib is associated
+  with a ClojureScript namespace. A lib's name also locates its root directory
+  within classpath using Java's package name to classpath-relative path mapping.
+  All resources in a lib should be contained in the directory structure under its
+  root directory. All definitions a lib makes should be in its associated namespace.
+
+  'require loads a lib by loading its root resource. The root resource path
+  is derived from the lib name in the following manner:
+  Consider a lib named by the symbol 'x.y.z; it has the root directory
+  <classpath>/x/y/, and its root resource is <classpath>/x/y/z.clj. The root
+  resource should contain code to create the lib's namespace (usually by using
+  the ns macro) and load any additional lib resources.
+
+  Libspecs
+
+  A libspec is a lib name or a vector containing a lib name followed by
+  options expressed as sequential keywords and arguments.
+
+  Recognized options:
+  :as takes a symbol as its argument and makes that symbol an alias to the
+    lib's namespace in the current namespace.
+  :refer takes a list of symbols to refer from the namespace..
+  :refer-macros takes a list of macro symbols to refer from the namespace.
+  :include-macros true causes macros from the namespace to be required.
+  :rename specifies a map from referred var names to different
+    symbols (and can be used to prevent clashes)
+
+
+  Flags
+
+  A flag is a keyword.
+  Recognized flags: :reload, :reload-all, :verbose
+  :reload forces loading of all the identified libs even if they are
+    already loaded
+  :reload-all implies :reload and also forces loading of all libs that the
+    identified libs directly or indirectly load via require or use
+  :verbose triggers printing information about each load, alias, and refer
+
+  Example:
+
+  The following would load the library clojure.string :as string.
+
+  (require '[clojure/string :as string])"
+  [& args]
+  `(~'ns* ~(cons :require args)))
 
 (core/defmacro require-macros
-  [& specs]
-  `(~'ns* ~(cons :require-macros specs)))
+  "Similar to require but only for macros."
+  [& args]
+  `(~'ns* ~(cons :require-macros args)))
 
 (core/defmacro use
-  [& specs]
-  `(~'ns* ~(cons :use specs)))
+  "Like require, but referring vars specified by the mandatory
+  :only option.
+
+  Example:
+
+  The following would load the library clojure.set while referring
+  the intersection var.
+
+  (use '[clojure.set :only [intersection]])"
+  [& args]
+  `(~'ns* ~(cons :use args)))
 
 (core/defmacro use-macros
-  [& specs]
-  `(~'ns* ~(cons :use-macros specs)))
+  "Similar to use but only for macros."
+  [& args]
+  `(~'ns* ~(cons :use-macros args)))
 
 (core/defmacro import
-  [& specs]
-  `(~'ns* ~(cons :import specs)))
+  "import-list => (closure-namespace constructor-name-symbols*)
+
+  For each name in constructor-name-symbols, adds a mapping from name to the
+  constructor named by closure-namespace to the current namespace. Use :import in the ns
+  macro in preference to calling this directly."
+  [& import-symbols-or-lists]
+  `(~'ns* ~(cons :import import-symbols-or-lists)))
 
 (core/defmacro refer-clojure
-  [& specs]
-  `(~'ns* ~(cons :refer-clojure specs)))
+  "Refers to all the public vars of `cljs.core`, subject to
+  filters.
+  Filters can include at most one each of:
+
+  :exclude list-of-symbols
+  :rename map-of-fromsymbol-tosymbol
+
+  Filters can be used to select a subset, via exclusion, or to provide a mapping
+  to a symbol different from the var's name, in order to prevent clashes."
+  [& args]
+  `(~'ns* ~(cons :refer-clojure args)))
 
 ;; INTERNAL - do not use, only for Node.js
 (core/defmacro load-file* [f]
@@ -2763,7 +2844,9 @@
   (core/assert (core/= (core/first quoted) 'quote)
     "Argument to macroexpand-1 must be quoted")
   (core/let [form (second quoted)]
-    `(quote ~(ana/macroexpand-1 &env form))))
+    (if (seq? form)
+      `(quote ~(ana/macroexpand-1 &env form))
+      form)))
 
 (core/defmacro macroexpand
   "Repeatedly calls macroexpand-1 on form until it no longer
@@ -2774,10 +2857,12 @@
     "Argument to macroexpand must be quoted")
   (core/let [form (second quoted)
              env &env]
-    (core/loop [form form form' (ana/macroexpand-1 env form)]
-      (core/if-not (core/identical? form form')
-        (recur form' (ana/macroexpand-1 env form'))
-        `(quote ~form')))))
+    (if (seq? form)
+      (core/loop [form form form' (ana/macroexpand-1 env form)]
+        (core/if-not (core/identical? form form')
+          (recur form' (ana/macroexpand-1 env form'))
+          `(quote ~form')))
+      form)))
 
 (core/defn- multi-arity-fn? [fdecl]
   (core/< 1 (count fdecl)))

@@ -24,7 +24,6 @@
             [cljs.analyzer.api :as ana-api]
             [cljs.env :as env]
             [cljs.js-deps :as deps]
-            [cljs.tagged-literals :as tags]
             [cljs.closure :as cljsc]
             [cljs.source-map :as sm])
   (:import [java.io File PushbackReader FileWriter PrintWriter]
@@ -447,12 +446,12 @@
     (evaluate-form repl-env env filename form wrap *repl-opts*))
   ([repl-env env filename form wrap opts]
    (binding [ana/*cljs-file* filename]
-     (let [env (assoc env
-                 :root-source-info
-                 {:source-type :fragment
-                  :source-form form})
+     (let [env (merge env
+                 {:root-source-info {:source-type :fragment
+                                     :source-form form}
+                  :repl-env repl-env})
            def-emits-var (:def-emits-var opts)
-           ast (ana/analyze (assoc env :repl-env repl-env :def-emits-var def-emits-var)
+           ast (ana/analyze (assoc env :def-emits-var def-emits-var)
                  (wrap form) nil opts)
            wrap-js
            ;; TODO: check opts as well - David
@@ -543,6 +542,30 @@
         (let [res (if (= File/separatorChar (first f)) f (io/resource f))]
           (assert res (str "Can't find " f " in classpath"))
           (load-stream repl-env f res))))))
+
+(defn- root-resource
+  "Returns the root directory path for a lib"
+  {:tag String}
+  [lib]
+  (str \/
+       (.. (name lib)
+           (replace \- \_)
+           (replace \. \/))))
+
+(defn- root-directory
+  "Returns the root resource path for a lib"
+  [lib]
+  (let [d (root-resource lib)]
+    (subs d 0 (.lastIndexOf d "/"))))
+
+(defn- load-path->cp-path
+  [path]
+  (let [src (if (= File/separatorChar (first path))
+              path
+              (str (root-directory ana/*cljs-ns*) \/ path))
+        src (.substring src 1)]
+    (or (io/resource (str src ".cljs"))
+        (io/resource (str src ".cljc")))))
 
 (defn- wrap-fn [form]
   (cond
@@ -653,7 +676,14 @@
              (swap! env/*compiler* assoc-in [::ana/namespaces ns-name] {:name ns-name})
              (-evaluate repl-env "<cljs repl>" 1
                (str "goog.provide('" (comp/munge ns-name) "');")))
-           (set! ana/*cljs-ns* ns-name)))]
+           (set! ana/*cljs-ns* ns-name)))
+        load-fn
+        (fn self
+          ([repl-env env form]
+           (self env repl-env form nil))
+          ([repl-env env [_ & paths :as form] opts]
+           (let [cp-paths (map load-path->cp-path paths)]
+             (run! #(load-file repl-env % opts) cp-paths))))]
     (wrap-special-fns wrap-self
      {'in-ns in-ns-fn
       'clojure.core/in-ns in-ns-fn
@@ -664,7 +694,9 @@
         ([repl-env env form]
          (self env repl-env form nil))
         ([repl-env env [_ ns :as form] opts]
-         (load-namespace repl-env ns opts)))})))
+         (load-namespace repl-env ns opts)))
+      'load load-fn
+      'clojure.core/load load-fn})))
 
 (defn analyze-source
   "Given a source directory, analyzes all .cljs files. Used to populate
@@ -759,7 +791,7 @@
                  (merge
                    ana/*cljs-warnings*
                    (if (or (true? warnings)
-                         (false? warnings))
+                           (false? warnings))
                      (zipmap (keys ana/*cljs-warnings*) (repeat warnings))
                      warnings)
                    (zipmap
@@ -767,7 +799,8 @@
                       :undeclared-ns :undeclared-ns-form]
                      (repeat (if (false? warnings)
                                false
-                               warn-on-undeclared)))))
+                               warn-on-undeclared)))
+                   {:infer-warning false}))
                ana/*cljs-static-fns* static-fns
                *repl-opts* opts]
        (let [env {:context :expr :locals {}}
@@ -1054,89 +1087,12 @@ itself (not its value) is returned. The reader macro #'x expands to (var x)."}})
 (def repl-special-doc-map
   '{in-ns {:arglists ([name])
            :doc "Sets *cljs-ns* to the namespace named by the symbol, creating it if needed."}
-    require {:arglists ([& args])
-             :doc "  Loads libs, skipping any that are already loaded. Each argument is
-  either a libspec that identifies a lib or a flag that modifies how all the identified
-  libs are loaded. Use :require in the ns macro in preference to calling this
-  directly.
-
-  Libs
-
-  A 'lib' is a named set of resources in classpath whose contents define a
-  library of ClojureScript code. Lib names are symbols and each lib is associated
-  with a ClojureScript namespace. A lib's name also locates its root directory
-  within classpath using Java's package name to classpath-relative path mapping.
-  All resources in a lib should be contained in the directory structure under its
-  root directory. All definitions a lib makes should be in its associated namespace.
-
-  'require loads a lib by loading its root resource. The root resource path
-  is derived from the lib name in the following manner:
-  Consider a lib named by the symbol 'x.y.z; it has the root directory
-  <classpath>/x/y/, and its root resource is <classpath>/x/y/z.clj. The root
-  resource should contain code to create the lib's namespace (usually by using
-  the ns macro) and load any additional lib resources.
-
-  Libspecs
-
-  A libspec is a lib name or a vector containing a lib name followed by
-  options expressed as sequential keywords and arguments.
-
-  Recognized options:
-  :as takes a symbol as its argument and makes that symbol an alias to the
-    lib's namespace in the current namespace.
-  :refer takes a list of symbols to refer from the namespace..
-  :refer-macros takes a list of macro symbols to refer from the namespace.
-  :include-macros true causes macros from the namespace to be required.
-
-  Flags
-
-  A flag is a keyword.
-  Recognized flags: :reload, :reload-all, :verbose
-  :reload forces loading of all the identified libs even if they are
-    already loaded
-  :reload-all implies :reload and also forces loading of all libs that the
-    identified libs directly or indirectly load via require or use
-  :verbose triggers printing information about each load, alias, and refer
-
-  Example:
-
-  The following would load the library clojure.string :as string.
-
-  (require '[clojure/string :as string])"}
-    require-macros {:arglists ([& args])
-                    :doc "Similar to the require REPL special function but
-    only for macros."}
-    use {:arglists ([& args])
-         :doc "Like require, but referring vars specified by the mandatory
-  :only option.
-
-  Example:
-
-  The following would load the library clojure.set while referring
-  the intersection var.
-
-  (use '[clojure.set :only [intersection]])"}
-    use-macros {:arglists ([& args])
-                :doc "Similar to the use REPL special function but
-    only for macros."}
-    refer-clojure {:arglists ([& args])
-                   :doc "Refers to all the public vars of `cljs.core`, subject to
-  filters.
-  Filters can include at most one each of:
-
-  :exclude list-of-symbols
-  :rename map-of-fromsymbol-tosymbol
-
-  Filters can be used to select a subset, via exclusion, or to provide a mapping
-  to a symbol different from the var's name, in order to prevent clashes."}
-    import {:arglists ([& import-symbols-or-lists])
-            :doc "import-list => (closure-namespace constructor-name-symbols*)
-
-  For each name in constructor-name-symbols, adds a mapping from name to the
-  constructor named by closure-namespace to the current namespace. Use :import in the ns
-  macro in preference to calling this directly."}
     load-file {:arglists ([name])
-               :doc "Sequentially read and evaluate the set of forms contained in the file."}})
+               :doc "Sequentially read and evaluate the set of forms contained in the file."}
+    load {:arglists ([& paths])
+               :doc "Loads Clojure code from resources in classpath. A path is interpreted as
+  classpath-relative if it begins with a slash or relative to the root
+  directory for the current namespace otherwise."}})
 
 (defn- repl-special-doc [name-symbol]
   (assoc (repl-special-doc-map name-symbol)
